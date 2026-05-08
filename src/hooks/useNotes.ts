@@ -6,7 +6,25 @@ const STORAGE_KEY = 'notes-app-v1';
 function load(): Note[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? (JSON.parse(raw) as Note[]) : [];
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as Array<Record<string, unknown>>;
+    return parsed.map((n) => {
+      // Migrate old format (title + content) → single body
+      let body: string;
+      if (typeof n.body === 'string') {
+        body = n.body;
+      } else {
+        const title   = typeof n.title   === 'string' ? n.title   : '';
+        const content = typeof n.content === 'string' ? n.content : '';
+        body = title ? (content ? `${title}\n\n${content}` : title) : content;
+      }
+      return {
+        id:        String(n.id ?? crypto.randomUUID()),
+        body,
+        createdAt: Number(n.createdAt ?? Date.now()),
+        updatedAt: Number(n.updatedAt ?? Date.now()),
+      };
+    });
   } catch {
     return [];
   }
@@ -22,8 +40,7 @@ export function useNotes() {
   const createNote = useCallback((): Note => {
     const note: Note = {
       id: crypto.randomUUID(),
-      title: '',
-      content: '',
+      body: '',
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -36,7 +53,7 @@ export function useNotes() {
   }, []);
 
   const updateNote = useCallback(
-    (id: string, patch: Partial<Pick<Note, 'title' | 'content'>>) => {
+    (id: string, patch: Partial<Pick<Note, 'body'>>) => {
       setNotes((prev) => {
         const next = prev.map((n) =>
           n.id === id ? { ...n, ...patch, updatedAt: Date.now() } : n

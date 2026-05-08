@@ -24,10 +24,10 @@
 .sidebar-brand {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 18px 18px 14px;
+  gap: 8px;
+  padding: 14px 14px 12px;
   border-bottom: 1px solid var(--border);
-  min-height: 56px;
+  min-height: 52px;
 }
 
 .sidebar-brand-icon {
@@ -44,6 +44,41 @@
   flex: 1;
 }
 
+/* Icon buttons (compose + settings + back) */
+
+.icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  border-radius: var(--r-sm);
+  color: var(--text-muted);
+  transition: background var(--ease), color var(--ease);
+}
+
+.icon-btn:hover {
+  background: var(--item-hover);
+  color: var(--text);
+}
+
+.icon-btn:active {
+  background: var(--item-active);
+}
+
+/* Brand actions cluster (right-side icons in brand bar) */
+
+.sidebar-brand-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
 .streak-badge {
   display: inline-flex;
   align-items: center;
@@ -55,33 +90,6 @@
   padding: 2px 8px 2px 6px;
   border-radius: 100px;
   line-height: 1;
-}
-
-/* New note button */
-
-.new-note-btn {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: calc(100% - 28px);
-  margin: 12px 14px 4px;
-  padding: 9px 14px;
-  background: var(--accent);
-  color: var(--accent-text);
-  border: none;
-  border-radius: var(--r-md);
-  font-size: 13.5px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  transition: background var(--ease), transform 80ms ease-out;
-}
-
-.new-note-btn:hover {
-  background: var(--accent-hover);
-}
-
-.new-note-btn:active {
-  transform: scale(0.97);
 }
 
 /* Notes list */
@@ -243,12 +251,6 @@
   margin-bottom: 24px;
 }
 
-.new-note-btn--welcome {
-  margin: 0 auto;
-  width: auto;
-  display: inline-flex;
-}
-
 /* Editor */
 
 .editor {
@@ -263,26 +265,8 @@
 .editor-topbar {
   display: none;
   align-items: center;
-  padding: 10px 16px 0;
+  padding: 10px 14px 0;
   min-height: 44px;
-}
-
-.editor-back-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  background: transparent;
-  border: none;
-  border-radius: var(--r-sm);
-  color: var(--text-muted);
-  transition: background var(--ease), color var(--ease);
-}
-
-.editor-back-btn:hover {
-  background: var(--border);
-  color: var(--text);
 }
 
 /* Scroll area */
@@ -295,34 +279,35 @@
   scrollbar-color: var(--border) transparent;
 }
 
-/* Title */
+/* Title line (first line = note title) */
 
-.editor-title {
+.editor-title-line {
   display: block;
   width: 100%;
-  font-size: 30px;
+  font-size: 28px;
   font-weight: 800;
   color: var(--text);
   background: transparent;
   border: none;
   outline: none;
-  letter-spacing: -0.045em;
-  line-height: 1.15;
+  letter-spacing: -0.04em;
+  line-height: 1.18;
   font-family: var(--font-ui);
-  margin-bottom: 20px;
+  padding: 0;
+  margin-bottom: 18px;
 }
 
-.editor-title::placeholder {
+.editor-title-line::placeholder {
   color: var(--text-faint);
   font-weight: 700;
 }
 
-/* Content textarea */
+/* Body textarea */
 
-.editor-textarea {
+.editor-body {
   display: block;
   width: 100%;
-  min-height: 240px;
+  min-height: 220px;
   background: transparent;
   border: none;
   outline: none;
@@ -334,9 +319,10 @@
   letter-spacing: 0.005em;
   max-width: 64ch;
   overflow: hidden;
+  caret-color: var(--accent);
 }
 
-.editor-textarea::placeholder {
+.editor-body::placeholder {
   color: var(--text-faint);
   font-style: italic;
 }
@@ -407,6 +393,111 @@
   color: var(--danger);
 }
 
+/* ── Settings panel ────────────────────────────────────────────────────────── */
+
+.settings-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  padding: 8px 0 16px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+.settings-section {
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-section:last-of-type {
+  border-bottom: none;
+}
+
+.settings-label {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin-bottom: 10px;
+}
+
+/* Theme segmented control */
+
+.settings-theme-toggle {
+  display: flex;
+  background: var(--item-hover);
+  border-radius: var(--r-sm);
+  padding: 3px;
+  gap: 2px;
+}
+
+.theme-option {
+  flex: 1;
+  padding: 6px 0;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: transparent;
+  border: none;
+  border-radius: 5px;
+  transition: background var(--ease), color var(--ease);
+}
+
+.theme-option:hover {
+  color: var(--text);
+}
+
+.theme-option--active {
+  background: var(--bg-elevated);
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: 0 1px 3px oklch(0% 0 0 / 0.08);
+}
+
+/* Settings action button */
+
+.settings-action-btn {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  background: var(--item-hover);
+  border: none;
+  border-radius: var(--r-sm);
+  transition: background var(--ease), color var(--ease);
+  text-align: left;
+}
+
+.settings-action-btn:hover {
+  background: var(--item-active);
+}
+
+.settings-action-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Stats at the bottom */
+
+.settings-stats {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 16px 18px 0;
+  font-size: 11.5px;
+  color: var(--text-faint);
+  margin-top: auto;
+}
+
+.settings-stats .sep {
+  color: var(--border-strong);
+}
+
 /* ── Mobile ─────────────────────────────────────────────────────────────────── */
 
 @media (max-width: 680px) {
@@ -450,12 +541,12 @@
     padding: 10px 22px;
   }
 
-  .editor-title {
-    font-size: 24px;
-    margin-bottom: 14px;
+  .editor-title-line {
+    font-size: 22px;
+    margin-bottom: 12px;
   }
 
-  .editor-textarea {
+  .editor-body {
     font-size: 16px;
     max-width: none;
     line-height: 1.75;

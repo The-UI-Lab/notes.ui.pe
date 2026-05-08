@@ -1,7 +1,6 @@
 export interface Note {
   id: string;
-  title: string;
-  content: string;
+  body: string;
   createdAt: number;
   updatedAt: number;
 }
