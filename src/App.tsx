@@ -98,10 +98,19 @@ export default function App() {
   const [showSaved,   setShowSaved]   = useState(false)
   const [streak,      setStreak]      = useState<number>(getStreak)
   const [theme,       setTheme]       = useState<Theme>(loadTheme)
+  const [searchQuery, setSearchQuery] = useState('')
+
+  const filteredNotes = searchQuery.trim()
+    ? sortedNotes.filter(n => n.body.toLowerCase().includes(searchQuery.toLowerCase()))
+    : sortedNotes
 
   const saveTimer    = useRef<ReturnType<typeof setTimeout> | null>(null)
   const titleLineRef = useRef<HTMLInputElement>(null)
   const restRef      = useRef<HTMLTextAreaElement>(null)
+  const notesListRef = useRef<HTMLDivElement>(null)
+  const searchInputRef = useRef<HTMLInputElement>(null)
+
+  const [searchOpen, setSearchOpen] = useState(false)
 
   const selectedNote: Note | undefined = notes.find((n) => n.id === selectedId)
 
@@ -117,20 +126,65 @@ export default function App() {
     if (scroll instanceof HTMLElement) scroll.scrollTop = 0
   }, [selectedId])
 
+  // ── Reveal search on notes-list scroll (iOS iMessage style) ───────────────
+  useEffect(() => {
+    const el = notesListRef.current
+    if (!el) return
+    let lastY = 0
+    const onScroll = () => {
+      const y = el.scrollTop
+      // Scrolling up (pulling toward top) reveals the search bar
+      if (y < lastY && y < 60) setSearchOpen(true)
+      lastY = y
+    }
+    el.addEventListener('scroll', onScroll, { passive: true })
+    return () => el.removeEventListener('scroll', onScroll)
+  }, [])
+
+  // ── Focus search input when opened ────────────────────────────────────────
+  useEffect(() => {
+    if (searchOpen) setTimeout(() => searchInputRef.current?.focus(), 180)
+  }, [searchOpen])
+
   // ── Handlers ──────────────────────────────────────────────────────────────
 
   const handleNewNote = useCallback(() => {
+    // Auto-delete current empty note (iOS Notes behaviour)
+    if (selectedId) {
+      const current = notes.find(n => n.id === selectedId)
+      if (current && !current.body.trim()) deleteNote(current.id)
+    }
     const note = createNote()
     setSelectedId(note.id)
     setMobileView('editor')
     setSidebarView('notes')
+    setSearchQuery('')
+    setSearchOpen(false)
     setTimeout(() => titleLineRef.current?.focus(), 50)
-  }, [createNote])
+  }, [createNote, selectedId, notes, deleteNote])
 
   const handleSelectNote = useCallback((id: string) => {
+    // Auto-delete previous empty note (iOS Notes behaviour)
+    if (selectedId && selectedId !== id) {
+      const current = notes.find(n => n.id === selectedId)
+      if (current && !current.body.trim()) deleteNote(current.id)
+    }
     setSelectedId(id)
     setMobileView('editor')
-  }, [])
+  }, [selectedId, notes, deleteNote])
+
+  const handleBackToList = useCallback(() => {
+    // Auto-delete current empty note when going back (iOS Notes behaviour)
+    if (selectedId) {
+      const current = notes.find(n => n.id === selectedId)
+      if (current && !current.body.trim()) {
+        deleteNote(current.id)
+        const remaining = notes.filter(n => n.id !== current.id)
+        setSelectedId(remaining[0]?.id ?? null)
+      }
+    }
+    setMobileView('list')
+  }, [selectedId, notes, deleteNote])
 
   const handleUpdate = useCallback(
     (id: string, body: string) => {
@@ -254,21 +308,11 @@ export default function App() {
                   {streak}
                 </span>
               )}
-              <div className="sidebar-brand-actions">
-                <button className="icon-btn" onClick={handleNewNote} aria-label="New note" title="New note (⌘N)">
-                  {/* Compose / pen icon */}
-                  <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                    <path d="M11.5 2.5a1.5 1.5 0 0 1 2.12 2.12l-8.5 8.5L2 14l.88-3.12 8.62-8.38z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" fill="none"/>
-                  </svg>
-                </button>
-                <button className="icon-btn" onClick={() => setSidebarView('settings')} aria-label="Settings" title="Settings">
-                  {/* Person / profile icon */}
-                  <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                    <circle cx="8" cy="5.5" r="2.5" stroke="currentColor" strokeWidth="1.4"/>
-                    <path d="M2.5 14c0-3 2.5-4.5 5.5-4.5s5.5 1.5 5.5 4.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
-                  </svg>
-                </button>
-              </div>
+              <button className="icon-btn" style={{ marginLeft: 'auto' }} onClick={handleNewNote} aria-label="New note" title="New note (⌘N)">
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <path d="M11.5 2.5a1.5 1.5 0 0 1 2.12 2.12l-8.5 8.5L2 14l.88-3.12 8.62-8.38z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" fill="none"/>
+                </svg>
+              </button>
             </>
           )}
         </div>
@@ -307,14 +351,39 @@ export default function App() {
           </div>
         ) : (
           <>
-            <div className="notes-list" role="list">
+            <div className={`search-bar${searchOpen ? ' search-bar--open' : ''}`}>
+              <svg className="search-bar-icon" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <circle cx="7" cy="7" r="5" stroke="currentColor" strokeWidth="1.5"/>
+                <path d="M11 11l3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+              </svg>
+              <input
+                ref={searchInputRef}
+                className="search-input"
+                type="search"
+                placeholder="Search"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                aria-label="Search notes"
+              />
+              {searchQuery && (
+                <button className="search-clear" onClick={() => setSearchQuery('')} aria-label="Clear search">✕</button>
+              )}
+            </div>
+
+            <div
+              ref={notesListRef}
+              className="notes-list"
+              role="list"
+            >
               {sortedNotes.length === 0 ? (
                 <div className="notes-empty">
                   <p>Every great idea starts somewhere.</p>
                   <button className="notes-empty-cta" onClick={handleNewNote}>Write your first note</button>
                 </div>
+              ) : filteredNotes.length === 0 ? (
+                <p className="notes-no-results">No notes match "{searchQuery}"</p>
               ) : (
-                sortedNotes.map((note) => (
+                filteredNotes.map((note) => (
                   <button
                     key={note.id}
                     role="listitem"
@@ -332,7 +401,27 @@ export default function App() {
             </div>
             <div className="sidebar-footer">
               <span>{notes.length} {notes.length === 1 ? 'note' : 'notes'}</span>
-              <span className="sidebar-footer-hint">⌘N new</span>
+              <button
+                className={`icon-btn${searchOpen ? ' icon-btn--active' : ''}`}
+                onClick={() => {
+                  const next = !searchOpen
+                  setSearchOpen(next)
+                  if (!next) { setSearchQuery(''); notesListRef.current?.scrollTo({ top: 0, behavior: 'smooth' }) }
+                }}
+                aria-label="Search notes"
+                title="Search"
+              >
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <circle cx="7" cy="7" r="5" stroke="currentColor" strokeWidth="1.5"/>
+                  <path d="M11 11l3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                </svg>
+              </button>
+              <button className="icon-btn" onClick={() => setSidebarView('settings')} aria-label="Settings" title="Settings">
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <circle cx="8" cy="8" r="2" stroke="currentColor" strokeWidth="1.4"/>
+                  <path d="M8 1.5V3M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1.06 1.06M11.54 11.54l1.06 1.06M3.4 12.6l1.06-1.06M11.54 4.46l1.06-1.06" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
+                </svg>
+              </button>
             </div>
           </>
         )}
@@ -358,7 +447,7 @@ export default function App() {
           <div className="editor">
 
             <div className="editor-topbar">
-              <button className="icon-btn" onClick={() => setMobileView('list')} aria-label="Back to notes">
+              <button className="icon-btn" onClick={handleBackToList} aria-label="Back to notes">
                 <svg width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
                   <path d="M13 4l-6 6 6 6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
                 </svg>
