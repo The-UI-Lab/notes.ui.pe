@@ -18,9 +18,13 @@ function load(): Note[] {
         const content = typeof n.content === 'string' ? n.content : '';
         body = title ? (content ? `${title}\n\n${content}` : title) : content;
       }
+      const images = Array.isArray(n.images)
+        ? (n.images as unknown[]).filter((s): s is string => typeof s === 'string')
+        : [];
       return {
         id:        String(n.id ?? crypto.randomUUID()),
         body,
+        images,
         createdAt: Number(n.createdAt ?? Date.now()),
         updatedAt: Number(n.updatedAt ?? Date.now()),
       };
@@ -41,6 +45,7 @@ export function useNotes() {
     const note: Note = {
       id: crypto.randomUUID(),
       body: '',
+      images: [],
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -73,5 +78,30 @@ export function useNotes() {
     });
   }, []);
 
-  return { notes, createNote, updateNote, deleteNote };
+  const addImages = useCallback((id: string, dataUrls: string[]) => {
+    setNotes((prev) => {
+      const next = prev.map((n) =>
+        n.id === id
+          ? { ...n, images: [...(n.images ?? []), ...dataUrls], updatedAt: Date.now() }
+          : n
+      );
+      persist(next);
+      return next;
+    });
+  }, []);
+
+  const removeImage = useCallback((id: string, index: number) => {
+    setNotes((prev) => {
+      const next = prev.map((n) => {
+        if (n.id !== id) return n;
+        const images = [...(n.images ?? [])];
+        images.splice(index, 1);
+        return { ...n, images, updatedAt: Date.now() };
+      });
+      persist(next);
+      return next;
+    });
+  }, []);
+
+  return { notes, createNote, updateNote, deleteNote, addImages, removeImage };
 }

@@ -89,7 +89,7 @@ function exportNotes(notes: Note[]): void {
 // ── Component ────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const { notes, createNote, updateNote, deleteNote } = useNotes()
+  const { notes, createNote, updateNote, deleteNote, addImages, removeImage } = useNotes()
   const sortedNotes = [...notes].sort((a, b) => b.updatedAt - a.updatedAt)
 
   const [selectedId,  setSelectedId]  = useState<string | null>(() => sortedNotes[0]?.id ?? null)
@@ -99,6 +99,7 @@ export default function App() {
   const [streak,      setStreak]      = useState<number>(getStreak)
   const [theme,       setTheme]       = useState<Theme>(loadTheme)
   const [searchQuery, setSearchQuery] = useState('')
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null)
 
   const filteredNotes = searchQuery.trim()
     ? sortedNotes.filter(n => n.body.toLowerCase().includes(searchQuery.toLowerCase()))
@@ -109,6 +110,7 @@ export default function App() {
   const restRef      = useRef<HTMLTextAreaElement>(null)
   const notesListRef = useRef<HTMLDivElement>(null)
   const searchInputRef = useRef<HTMLInputElement>(null)
+  const imageInputRef  = useRef<HTMLInputElement>(null)
 
   const [searchOpen, setSearchOpen] = useState(false)
 
@@ -219,6 +221,102 @@ export default function App() {
     ta.style.height = `${ta.scrollHeight}px`
   }, [])
 
+  // ── Image handlers ────────────────────────────────────────────────────────
+
+  const handleImageUpload = useCallback(
+    (files: FileList | null) => {
+      if (!files || !selectedNote) return
+      const noteId = selectedNote.id
+      Promise.all(
+        Array.from(files).map(
+          (file) =>
+            new Promise<string | null>((resolve) => {
+              const reader = new FileReader()
+              reader.onload = (ev) => resolve(ev.target?.result as string)
+              reader.onerror = () => resolve(null)
+              reader.readAsDataURL(file)
+            })
+        )
+      ).then((results) => {
+        const dataUrls = results.filter(Boolean) as string[]
+        if (dataUrls.length) addImages(noteId, dataUrls)
+      })
+      // Reset so the same file can be re-selected
+      if (imageInputRef.current) imageInputRef.current.value = ''
+    },
+    [selectedNote, addImages]
+  )
+
+  const handleImageRemove = useCallback(
+    (index: number) => {
+      if (!selectedNote) return
+      removeImage(selectedNote.id, index)
+    },
+    [selectedNote, removeImage]
+  )
+
+  const handlePaste = useCallback(
+    (e: React.ClipboardEvent) => {
+      if (!selectedNote) return
+      const imageItems = Array.from(e.clipboardData.items).filter((item) =>
+        item.type.startsWith('image/')
+      )
+      if (!imageItems.length) return
+      const noteId = selectedNote.id
+      Promise.all(
+        imageItems.map(
+          (item) =>
+            new Promise<string | null>((resolve) => {
+              const file = item.getAsFile()
+              if (!file) { resolve(null); return }
+              const reader = new FileReader()
+              reader.onload = (ev) => resolve(ev.target?.result as string)
+              reader.onerror = () => resolve(null)
+              reader.readAsDataURL(file)
+            })
+        )
+      ).then((results) => {
+        const dataUrls = results.filter(Boolean) as string[]
+        if (dataUrls.length) addImages(noteId, dataUrls)
+      })
+    },
+    [selectedNote, addImages]
+  )
+
+  const handleDrop = useCallback(
+    (e: React.DragEvent) => {
+      if (!selectedNote) return
+      const imageFiles = Array.from(e.dataTransfer.files).filter((f) =>
+        f.type.startsWith('image/')
+      )
+      if (!imageFiles.length) return
+      e.preventDefault()
+      const noteId = selectedNote.id
+      Promise.all(
+        imageFiles.map(
+          (file) =>
+            new Promise<string | null>((resolve) => {
+              const reader = new FileReader()
+              reader.onload = (ev) => resolve(ev.target?.result as string)
+              reader.onerror = () => resolve(null)
+              reader.readAsDataURL(file)
+            })
+        )
+      ).then((results) => {
+        const dataUrls = results.filter(Boolean) as string[]
+        if (dataUrls.length) addImages(noteId, dataUrls)
+      })
+    },
+    [selectedNote, addImages]
+  )
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    if (Array.from(e.dataTransfer.items).some((i) => i.type.startsWith('image/'))) {
+      e.preventDefault()
+      e.dataTransfer.dropEffect = 'copy'
+    }
+  }, [])
+
   useEffect(() => {
     autoResize()
   }, [selectedNote?.body, autoResize])
@@ -226,6 +324,13 @@ export default function App() {
   // ── Keyboard shortcuts ────────────────────────────────────────────────────
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (lightboxIndex !== null) {
+        const images = selectedNote?.images ?? []
+        if (e.key === 'Escape') { setLightboxIndex(null); return }
+        if (e.key === 'ArrowRight') { setLightboxIndex((lightboxIndex + 1) % images.length); return }
+        if (e.key === 'ArrowLeft') { setLightboxIndex((lightboxIndex - 1 + images.length) % images.length); return }
+        return
+      }
       if ((e.metaKey || e.ctrlKey) && e.key === 'n') {
         e.preventDefault()
         handleNewNote()
@@ -233,7 +338,7 @@ export default function App() {
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [handleNewNote])
+  }, [handleNewNote, lightboxIndex, selectedNote])
 
   // ── Derived ───────────────────────────────────────────────────────────────
   const words      = selectedNote ? countWords(selectedNote.body) : 0
@@ -278,6 +383,7 @@ export default function App() {
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
+    <>
     <div className={`app${mobileView === 'editor' ? ' app--editor-view' : ''}`}>
 
       {/* ── Sidebar ──────────────────────────────────────────────────────── */}
@@ -454,7 +560,11 @@ export default function App() {
               </button>
             </div>
 
-            <div className="editor-scroll">
+            <div className="editor-scroll"
+              onDrop={handleDrop}
+              onDragOver={handleDragOver}
+              onPaste={handlePaste}
+            >
               <input
                 ref={titleLineRef}
                 className="editor-title-line"
@@ -477,6 +587,35 @@ export default function App() {
                 aria-label="Note body"
                 spellCheck
               />
+
+              {(selectedNote.images?.length ?? 0) > 0 && (
+                <div className="editor-images" aria-label="Attached images">
+                  {selectedNote.images.map((src, i) => (
+                    <div key={i} className="editor-image-item">
+                      <img
+                        src={src}
+                        alt={`Attachment ${i + 1}`}
+                        className="editor-image-thumb"
+                        onClick={() => setLightboxIndex(i)}
+                        role="button"
+                        tabIndex={0}
+                        onKeyDown={(e) => e.key === 'Enter' && setLightboxIndex(i)}
+                        aria-label={`View image ${i + 1}`}
+                      />
+                      <button
+                        className="editor-image-remove"
+                        onClick={() => handleImageRemove(i)}
+                        aria-label={`Remove image ${i + 1}`}
+                        title="Remove image"
+                      >
+                        <svg width="8" height="8" viewBox="0 0 8 8" fill="none" aria-hidden="true">
+                          <path d="M1 1l6 6M7 1L1 7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+                        </svg>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
 
             <div className="editor-footer">
@@ -491,6 +630,28 @@ export default function App() {
                 {showSaved && (
                   <span className="save-indicator" aria-live="polite">Saved</span>
                 )}
+                <button
+                  className="icon-btn"
+                  onClick={() => imageInputRef.current?.click()}
+                  aria-label="Add image"
+                  title="Add image"
+                >
+                  <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <rect x="1.5" y="3" width="13" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.4"/>
+                    <circle cx="5.5" cy="7" r="1.3" fill="currentColor"/>
+                    <path d="M1.5 12l4-4 3 3 2-2 4 4" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"/>
+                  </svg>
+                </button>
+                <input
+                  ref={imageInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  style={{ display: 'none' }}
+                  onChange={(e) => handleImageUpload(e.target.files)}
+                  aria-hidden="true"
+                  tabIndex={-1}
+                />
                 <button
                   className="delete-btn"
                   onClick={() => handleDelete(selectedNote.id)}
@@ -509,5 +670,73 @@ export default function App() {
       </main>
 
     </div>
+
+      {/* ── Lightbox ────────────────────────────────────────────────── */}
+      {lightboxIndex !== null && selectedNote && (() => {
+        const images = selectedNote.images ?? []
+        const src = images[lightboxIndex]
+        const hasPrev = images.length > 1
+        const hasNext = images.length > 1
+        return (
+          <div
+            className="lightbox-overlay"
+            onClick={() => setLightboxIndex(null)}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Image viewer"
+          >
+            <button className="lightbox-close" onClick={() => setLightboxIndex(null)} aria-label="Close">
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                <path d="M1 1l12 12M13 1L1 13" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+              </svg>
+            </button>
+
+            {hasPrev && (
+              <button
+                className="lightbox-nav lightbox-nav--prev"
+                onClick={(e) => { e.stopPropagation(); setLightboxIndex((lightboxIndex - 1 + images.length) % images.length) }}
+                aria-label="Previous image"
+              >
+                <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                  <path d="M11 4l-5 5 5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+              </button>
+            )}
+
+            <img
+              src={src}
+              alt={`Attachment ${lightboxIndex + 1}`}
+              className="lightbox-img"
+              onClick={(e) => e.stopPropagation()}
+            />
+
+            {hasNext && (
+              <button
+                className="lightbox-nav lightbox-nav--next"
+                onClick={(e) => { e.stopPropagation(); setLightboxIndex((lightboxIndex + 1) % images.length) }}
+                aria-label="Next image"
+              >
+                <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                  <path d="M7 4l5 5-5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+              </button>
+            )}
+
+            {images.length > 1 && (
+              <div className="lightbox-dots" onClick={(e) => e.stopPropagation()}>
+                {images.map((_, i) => (
+                  <button
+                    key={i}
+                    className={`lightbox-dot${i === lightboxIndex ? ' lightbox-dot--active' : ''}`}
+                    onClick={() => setLightboxIndex(i)}
+                    aria-label={`Go to image ${i + 1}`}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        )
+      })()}
+    </>
   )
 }
