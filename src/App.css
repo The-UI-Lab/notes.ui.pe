@@ -1,0 +1,487 @@
+/* ── App shell ─────────────────────────────────────────────────────────────── */
+
+.app {
+  display: flex;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+/* ── Sidebar ───────────────────────────────────────────────────────────────── */
+
+.sidebar {
+  width: 272px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+}
+
+/* Brand bar */
+
+.sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 18px 18px 14px;
+  border-bottom: 1px solid var(--border);
+  min-height: 56px;
+}
+
+.sidebar-brand-icon {
+  color: var(--accent);
+  flex-shrink: 0;
+  display: flex;
+}
+
+.sidebar-brand-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.02em;
+  flex: 1;
+}
+
+.streak-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-soft);
+  padding: 2px 8px 2px 6px;
+  border-radius: 100px;
+  line-height: 1;
+}
+
+/* New note button */
+
+.new-note-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: calc(100% - 28px);
+  margin: 12px 14px 4px;
+  padding: 9px 14px;
+  background: var(--accent);
+  color: var(--accent-text);
+  border: none;
+  border-radius: var(--r-md);
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  transition: background var(--ease), transform 80ms ease-out;
+}
+
+.new-note-btn:hover {
+  background: var(--accent-hover);
+}
+
+.new-note-btn:active {
+  transform: scale(0.97);
+}
+
+/* Notes list */
+
+.notes-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+/* Empty state */
+
+.notes-empty {
+  padding: 36px 20px;
+  text-align: center;
+}
+
+.notes-empty p {
+  font-size: 13px;
+  color: var(--text-muted);
+  line-height: 1.55;
+  margin-bottom: 16px;
+  font-style: italic;
+}
+
+.notes-empty-cta {
+  display: inline-flex;
+  padding: 7px 16px;
+  background: transparent;
+  color: var(--accent);
+  border: 1.5px solid var(--accent);
+  border-radius: var(--r-sm);
+  font-size: 13px;
+  font-weight: 600;
+  transition: background var(--ease), color var(--ease);
+}
+
+.notes-empty-cta:hover {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+/* Note list items */
+
+.note-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  padding: 11px 18px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  transition: background var(--ease);
+}
+
+.note-item:hover {
+  background: var(--item-hover);
+}
+
+.note-item--active {
+  background: var(--item-active);
+}
+
+.note-item-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.015em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.note-item--active .note-item-title {
+  color: var(--accent);
+}
+
+.note-item-preview {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.45;
+}
+
+.note-item-meta {
+  font-size: 11px;
+  color: var(--text-faint);
+  margin-top: 1px;
+}
+
+/* Sidebar footer */
+
+.sidebar-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 18px;
+  border-top: 1px solid var(--border);
+  font-size: 11.5px;
+  color: var(--text-faint);
+}
+
+.sidebar-footer-hint {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
+}
+
+/* ── Editor pane ───────────────────────────────────────────────────────────── */
+
+.editor-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-elevated);
+  min-width: 0;
+}
+
+/* Welcome / empty state */
+
+.editor-welcome {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 48px;
+}
+
+.editor-welcome-inner {
+  text-align: center;
+  max-width: 300px;
+}
+
+.editor-welcome-icon {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 20px;
+  color: var(--text-faint);
+}
+
+.editor-welcome-inner h2 {
+  font-size: 21px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.04em;
+  margin-bottom: 8px;
+}
+
+.editor-welcome-inner p {
+  font-size: 14px;
+  color: var(--text-muted);
+  line-height: 1.6;
+  margin-bottom: 24px;
+}
+
+.new-note-btn--welcome {
+  margin: 0 auto;
+  width: auto;
+  display: inline-flex;
+}
+
+/* Editor */
+
+.editor {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* Top bar — only visible on mobile for the back button */
+
+.editor-topbar {
+  display: none;
+  align-items: center;
+  padding: 10px 16px 0;
+  min-height: 44px;
+}
+
+.editor-back-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  background: transparent;
+  border: none;
+  border-radius: var(--r-sm);
+  color: var(--text-muted);
+  transition: background var(--ease), color var(--ease);
+}
+
+.editor-back-btn:hover {
+  background: var(--border);
+  color: var(--text);
+}
+
+/* Scroll area */
+
+.editor-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 32px 48px 48px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+/* Title */
+
+.editor-title {
+  display: block;
+  width: 100%;
+  font-size: 30px;
+  font-weight: 800;
+  color: var(--text);
+  background: transparent;
+  border: none;
+  outline: none;
+  letter-spacing: -0.045em;
+  line-height: 1.15;
+  font-family: var(--font-ui);
+  margin-bottom: 20px;
+}
+
+.editor-title::placeholder {
+  color: var(--text-faint);
+  font-weight: 700;
+}
+
+/* Content textarea */
+
+.editor-textarea {
+  display: block;
+  width: 100%;
+  min-height: 240px;
+  background: transparent;
+  border: none;
+  outline: none;
+  resize: none;
+  font-size: 17px;
+  line-height: 1.82;
+  color: var(--text);
+  font-family: var(--font-writing);
+  letter-spacing: 0.005em;
+  max-width: 64ch;
+  overflow: hidden;
+}
+
+.editor-textarea::placeholder {
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+/* Footer */
+
+.editor-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 48px;
+  border-top: 1px solid var(--border);
+  min-height: 44px;
+}
+
+.editor-stats {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.editor-stats .sep {
+  color: var(--border-strong);
+}
+
+.editor-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Save indicator */
+
+.save-indicator {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  animation: saved-pop 2.2s ease-out forwards;
+}
+
+@keyframes saved-pop {
+  0%   { opacity: 0; transform: translateY(3px); }
+  18%  { opacity: 1; transform: translateY(0); }
+  75%  { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+/* Delete button */
+
+.delete-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  background: transparent;
+  border: none;
+  border-radius: var(--r-sm);
+  color: var(--text-faint);
+  transition: background var(--ease), color var(--ease);
+}
+
+.delete-btn:hover {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+/* ── Mobile ─────────────────────────────────────────────────────────────────── */
+
+@media (max-width: 680px) {
+  .app {
+    position: relative;
+  }
+
+  .sidebar {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    z-index: 1;
+    transition: transform 280ms cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .editor-pane {
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    transform: translateX(100%);
+    transition: transform 280ms cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  .app--editor-view .sidebar {
+    transform: translateX(-100%);
+  }
+
+  .app--editor-view .editor-pane {
+    transform: translateX(0);
+  }
+
+  .editor-topbar {
+    display: flex;
+  }
+
+  .editor-scroll {
+    padding: 16px 22px 40px;
+  }
+
+  .editor-footer {
+    padding: 10px 22px;
+  }
+
+  .editor-title {
+    font-size: 24px;
+    margin-bottom: 14px;
+  }
+
+  .editor-textarea {
+    font-size: 16px;
+    max-width: none;
+    line-height: 1.75;
+  }
+
+  /* Pinch of extra stats space */
+  .editor-stats .sep:last-of-type,
+  .editor-stats span:last-child {
+    display: none;
+  }
+}
+
+/* ── Narrow sidebar layout ─────────────────────────────────────────────────── */
+
+@media (min-width: 681px) and (max-width: 900px) {
+  .sidebar {
+    width: 220px;
+  }
+
+  .editor-scroll {
+    padding: 28px 32px 40px;
+  }
+
+  .editor-footer {
+    padding: 10px 32px;
+  }
+}
+
+

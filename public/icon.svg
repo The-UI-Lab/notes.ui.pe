@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Rounded square background — warm terracotta -->
+  <rect width="512" height="512" rx="112" fill="#8a3218"/>
+
+  <!-- Paper / page -->
+  <rect x="118" y="96" width="260" height="320" rx="22" fill="#f5ede3" opacity="0.96"/>
+
+  <!-- Ruled lines -->
+  <rect x="158" y="172" width="180" height="11" rx="5.5" fill="#8a3218" opacity="0.30"/>
+  <rect x="158" y="206" width="196" height="11" rx="5.5" fill="#8a3218" opacity="0.30"/>
+  <rect x="158" y="240" width="164" height="11" rx="5.5" fill="#8a3218" opacity="0.30"/>
+  <rect x="158" y="274" width="188" height="11" rx="5.5" fill="#8a3218" opacity="0.30"/>
+  <rect x="158" y="308" width="148" height="11" rx="5.5" fill="#8a3218" opacity="0.30"/>
+
+  <!-- Pen — body -->
+  <rect x="296" y="88" width="36" height="120" rx="10" fill="#f5ede3" transform="rotate(42 296 88)"/>
+  <!-- Pen — nib -->
+  <polygon points="368,118 350,148 380,152" fill="#f5ede3" opacity="0.85"/>
+  <!-- Pen — cap accent -->
+  <rect x="296" y="88" width="36" height="28" rx="10" fill="#c45c32" transform="rotate(42 296 88)"/>
+</svg>
