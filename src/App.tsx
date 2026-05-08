@@ -1,7 +1,15 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { useNotes } from './hooks/useNotes'
-import type { Note } from './types'
+import type { Note, FbPostInfo } from './types'
 import { SettingsPanel } from './components/SettingsPanel'
+import { FacebookFeed } from './components/FacebookFeed'
+import {
+  loadFbSettings,
+  publishNoteToPage,
+  updatePostMessage,
+  postUrl,
+  type FbSettings,
+} from './utils/facebook'
 import './App.css'
 
 // ── Utilities ────────────────────────────────────────────────────────────────
@@ -69,13 +77,20 @@ function applyTheme(theme: Theme): void {
 // ── Component ────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const { notes, createNote, updateNote, deleteNote, addImages, removeImage, restoreNotes } = useNotes()
+  const {
+    notes, createNote, updateNote, deleteNote,
+    addImages, removeImage, restoreNotes,
+    setFbPost, clearFbPost,
+  } = useNotes()
   const sortedNotes = [...notes].sort((a, b) => b.updatedAt - a.updatedAt)
 
   const [selectedId,    setSelectedId]    = useState<string | null>(() => sortedNotes[0]?.id ?? null)
   const [mobileView,    setMobileView]    = useState<'list' | 'editor'>('list')
-  const [sidebarView,   setSidebarView]   = useState<'notes' | 'settings'>('notes')
+  const [sidebarView,   setSidebarView]   = useState<'notes' | 'settings' | 'facebook'>('notes')
   const [settingsPage,  setSettingsPage]  = useState<'home' | 'facebook' | 's3'>('home')
+  const [fbSettings,    setFbSettings]    = useState<FbSettings | null>(loadFbSettings)
+  const [fbBusy,        setFbBusy]        = useState(false)
+  const [fbError,       setFbError]       = useState<string | null>(null)
   const [showSaved,     setShowSaved]     = useState(false)
   const [streak,        setStreak]        = useState<number>(getStreak)
   const [theme,         setTheme]         = useState<Theme>(loadTheme)
@@ -103,10 +118,18 @@ export default function App() {
     localStorage.setItem(THEME_KEY, theme)
   }, [theme])
 
+  // ── Re-read FB settings whenever we leave the settings panel ─────────────
+  useEffect(() => {
+    if (sidebarView !== 'settings') {
+      setFbSettings(loadFbSettings())
+    }
+  }, [sidebarView, settingsPage])
+
   // ── Scroll to top on note switch ──────────────────────────────────────────
   useEffect(() => {
     const scroll = restRef.current?.closest('.editor-scroll')
     if (scroll instanceof HTMLElement) scroll.scrollTop = 0
+    setFbError(null)
   }, [selectedId])
 
   // ── Reveal search on notes-list scroll (iOS iMessage style) ───────────────
@@ -194,6 +217,46 @@ export default function App() {
     },
     [deleteNote, notes]
   )
+
+  // ── Facebook publish / update ─────────────────────────────────────────────
+  const handleFbPublish = useCallback(async () => {
+    if (!fbSettings || !selectedNote) return
+    setFbBusy(true)
+    setFbError(null)
+    try {
+      const ts = Date.now()
+      if (selectedNote.fbPost) {
+        // Update existing post (message only — photos can't be changed via API)
+        await updatePostMessage(fbSettings, selectedNote.fbPost.id, selectedNote.body)
+        const updated: FbPostInfo = {
+          ...selectedNote.fbPost,
+          lastSyncedAt: ts,
+          syncedBody: selectedNote.body,
+          history: [
+            ...selectedNote.fbPost.history,
+            { ts, body: selectedNote.body, action: 'update' },
+          ],
+        }
+        setFbPost(selectedNote.id, updated)
+      } else {
+        const { id } = await publishNoteToPage(fbSettings, selectedNote.body, selectedNote.images)
+        const fbPost: FbPostInfo = {
+          id,
+          pageId: fbSettings.pageId,
+          postedAt: ts,
+          lastSyncedAt: ts,
+          syncedBody: selectedNote.body,
+          imageCount: selectedNote.images.length,
+          history: [{ ts, body: selectedNote.body, action: 'publish' }],
+        }
+        setFbPost(selectedNote.id, fbPost)
+      }
+    } catch (e) {
+      setFbError((e as Error).message)
+    } finally {
+      setFbBusy(false)
+    }
+  }, [fbSettings, selectedNote, setFbPost])
 
   // ── Auto-resize rest textarea ─────────────────────────────────────────────
   const autoResize = useCallback(() => {
@@ -394,6 +457,19 @@ export default function App() {
                   : 'Settings'}
               </span>
             </>
+          ) : sidebarView === 'facebook' ? (
+            <>
+              <button
+                className="icon-btn"
+                onClick={() => setSidebarView('notes')}
+                aria-label="Back to notes"
+              >
+                <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                  <path d="M11 4l-5 5 5 5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+              </button>
+              <span className="sidebar-brand-name">Page Feed</span>
+            </>
           ) : (
             <>
               <svg className="sidebar-brand-icon" width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
@@ -426,6 +502,17 @@ export default function App() {
             onRestoreNotes={restoreNotes}
             settingsPage={settingsPage}
             setSettingsPage={setSettingsPage}
+          />
+        ) : sidebarView === 'facebook' && fbSettings ? (
+          <FacebookFeed
+            notes={notes}
+            fb={fbSettings}
+            onOpenNote={(id) => {
+              setSelectedId(id)
+              setSidebarView('notes')
+              setMobileView('editor')
+            }}
+            onClearFbPost={clearFbPost}
           />
         ) : (
           <>
@@ -494,6 +581,18 @@ export default function App() {
                   <path d="M11 11l3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
                 </svg>
               </button>
+              {fbSettings && (
+                <button
+                  className="icon-btn"
+                  onClick={() => setSidebarView('facebook')}
+                  aria-label="Page feed"
+                  title="Page feed"
+                >
+                  <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <path d="M14 8a6 6 0 1 0-6.94 5.93V9.84H5.31V8h1.75V6.66c0-1.73 1.03-2.68 2.6-2.68.75 0 1.54.14 1.54.14v1.69h-.87c-.85 0-1.12.53-1.12 1.07V8h1.9l-.3 1.84H9.21v4.09A6.003 6.003 0 0 0 14 8z" fill="currentColor"/>
+                  </svg>
+                </button>
+              )}
               <button className="icon-btn" onClick={() => setSidebarView('settings')} aria-label="Settings" title="Settings">
                 <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                   <path d="M6.8 2h2.4l.45 1.55c.4.17.77.4 1.1.68l1.55-.45 1.2 2.08-.98.98c.05.28.08.56.08.86s-.03.58-.08.86l.98.98-1.2 2.08-1.55-.45c-.33.28-.7.51-1.1.68L9.2 14H6.8l-.45-1.55a4.3 4.3 0 0 1-1.1-.68l-1.55.45L2.5 10.14l.98-.98A4.23 4.23 0 0 1 3.4 8.3c0-.3.03-.58.08-.86L2.5 6.46 3.7 4.38l1.55.45c.33-.28.7-.51 1.1-.68L6.8 2Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" fill="none"/>
@@ -602,6 +701,11 @@ export default function App() {
                 {showSaved && (
                   <span className="save-indicator" aria-live="polite">Saved</span>
                 )}
+                {fbError && (
+                  <span className="fb-error" role="alert" title={fbError}>
+                    {fbError.length > 40 ? fbError.slice(0, 40) + '…' : fbError}
+                  </span>
+                )}
                 <button
                   className="icon-btn"
                   onClick={() => imageInputRef.current?.click()}
@@ -624,6 +728,47 @@ export default function App() {
                   aria-hidden="true"
                   tabIndex={-1}
                 />
+                {fbSettings && (() => {
+                  const fp = selectedNote.fbPost
+                  const dirty = fp ? selectedNote.body.trim() !== fp.syncedBody.trim() : true
+                  const canPost = selectedNote.body.trim().length > 0
+                  const label = fp
+                    ? (dirty ? 'Update FB post' : 'Synced with FB')
+                    : 'Post to Facebook'
+                  return (
+                    <>
+                      {fp && (
+                        <a
+                          href={postUrl(fp.id)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="icon-btn"
+                          title="Open post on Facebook"
+                          aria-label="Open post on Facebook"
+                        >
+                          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                            <path d="M5 2H2v10h10V9M8 2h4v4M12 2L6.5 7.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/>
+                          </svg>
+                        </a>
+                      )}
+                      <button
+                        className={`fb-post-btn${fp && !dirty ? ' fb-post-btn--synced' : ''}`}
+                        onClick={handleFbPublish}
+                        disabled={fbBusy || !canPost || (!!fp && !dirty)}
+                        title={label}
+                      >
+                        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                          <path d="M14 8a6 6 0 1 0-6.94 5.93V9.84H5.31V8h1.75V6.66c0-1.73 1.03-2.68 2.6-2.68.75 0 1.54.14 1.54.14v1.69h-.87c-.85 0-1.12.53-1.12 1.07V8h1.9l-.3 1.84H9.21v4.09A6.003 6.003 0 0 0 14 8z" fill="currentColor"/>
+                        </svg>
+                        <span>
+                          {fbBusy
+                            ? (fp ? 'Updating…' : 'Posting…')
+                            : label}
+                        </span>
+                      </button>
+                    </>
+                  )
+                })()}
                 <button
                   className="delete-btn"
                   onClick={() => handleDelete(selectedNote.id)}

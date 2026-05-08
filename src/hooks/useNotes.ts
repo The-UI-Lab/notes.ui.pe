@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import type { Note } from '../types';
+import type { Note, FbPostInfo } from '../types';
 
 const STORAGE_KEY = 'notes-app-v1';
 
@@ -21,12 +21,17 @@ function load(): Note[] {
       const images = Array.isArray(n.images)
         ? (n.images as unknown[]).filter((s): s is string => typeof s === 'string')
         : [];
+      const fbPost =
+        n.fbPost && typeof n.fbPost === 'object'
+          ? (n.fbPost as FbPostInfo)
+          : undefined;
       return {
         id:        String(n.id ?? crypto.randomUUID()),
         body,
         images,
         createdAt: Number(n.createdAt ?? Date.now()),
         updatedAt: Number(n.updatedAt ?? Date.now()),
+        ...(fbPost ? { fbPost } : {}),
       };
     });
   } catch {
@@ -108,5 +113,38 @@ export function useNotes() {
     setNotes(restoredNotes);
   }, []);
 
-  return { notes, createNote, updateNote, deleteNote, addImages, removeImage, restoreNotes };
+  const setFbPost = useCallback((id: string, fbPost: FbPostInfo) => {
+    setNotes((prev) => {
+      const next = prev.map((n) =>
+        n.id === id ? { ...n, fbPost } : n
+      );
+      persist(next);
+      return next;
+    });
+  }, []);
+
+  const clearFbPost = useCallback((id: string) => {
+    setNotes((prev) => {
+      const next = prev.map((n) => {
+        if (n.id !== id) return n;
+        const { fbPost: _omit, ...rest } = n;
+        void _omit;
+        return rest as Note;
+      });
+      persist(next);
+      return next;
+    });
+  }, []);
+
+  return {
+    notes,
+    createNote,
+    updateNote,
+    deleteNote,
+    addImages,
+    removeImage,
+    restoreNotes,
+    setFbPost,
+    clearFbPost,
+  };
 }
