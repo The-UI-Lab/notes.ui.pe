@@ -103,5 +103,10 @@ export function useNotes() {
     });
   }, []);
 
-  return { notes, createNote, updateNote, deleteNote, addImages, removeImage };
+  const restoreNotes = useCallback((restoredNotes: Note[]) => {
+    persist(restoredNotes);
+    setNotes(restoredNotes);
+  }, []);
+
+  return { notes, createNote, updateNote, deleteNote, addImages, removeImage, restoreNotes };
 }

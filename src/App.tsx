@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { useNotes } from './hooks/useNotes'
 import type { Note } from './types'
+import { SettingsPanel } from './components/SettingsPanel'
 import './App.css'
 
 // ── Utilities ────────────────────────────────────────────────────────────────
@@ -65,40 +66,20 @@ function applyTheme(theme: Theme): void {
   else root.setAttribute('data-theme', theme)
 }
 
-function exportNotes(notes: Note[]): void {
-  if (!notes.length) return
-  const text = [...notes]
-    .sort((a, b) => b.updatedAt - a.updatedAt)
-    .map((n) => {
-      const title = extractTitle(n.body)
-      const date  = new Date(n.createdAt).toLocaleDateString('en', { year: 'numeric', month: 'long', day: 'numeric' })
-      return `# ${title}\n${date}\n\n${n.body}`
-    })
-    .join('\n\n---\n\n')
-  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
-  const url  = URL.createObjectURL(blob)
-  const a    = document.createElement('a')
-  a.href     = url
-  a.download = `notes-${new Date().toISOString().slice(0, 10)}.txt`
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
-  URL.revokeObjectURL(url)
-}
-
 // ── Component ────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const { notes, createNote, updateNote, deleteNote, addImages, removeImage } = useNotes()
+  const { notes, createNote, updateNote, deleteNote, addImages, removeImage, restoreNotes } = useNotes()
   const sortedNotes = [...notes].sort((a, b) => b.updatedAt - a.updatedAt)
 
-  const [selectedId,  setSelectedId]  = useState<string | null>(() => sortedNotes[0]?.id ?? null)
-  const [mobileView,  setMobileView]  = useState<'list' | 'editor'>('list')
-  const [sidebarView, setSidebarView] = useState<'notes' | 'settings'>('notes')
-  const [showSaved,   setShowSaved]   = useState(false)
-  const [streak,      setStreak]      = useState<number>(getStreak)
-  const [theme,       setTheme]       = useState<Theme>(loadTheme)
-  const [searchQuery, setSearchQuery] = useState('')
+  const [selectedId,    setSelectedId]    = useState<string | null>(() => sortedNotes[0]?.id ?? null)
+  const [mobileView,    setMobileView]    = useState<'list' | 'editor'>('list')
+  const [sidebarView,   setSidebarView]   = useState<'notes' | 'settings'>('notes')
+  const [settingsPage,  setSettingsPage]  = useState<'home' | 'facebook' | 's3'>('home')
+  const [showSaved,     setShowSaved]     = useState(false)
+  const [streak,        setStreak]        = useState<number>(getStreak)
+  const [theme,         setTheme]         = useState<Theme>(loadTheme)
+  const [searchQuery,   setSearchQuery]   = useState('')
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null)
 
   const filteredNotes = searchQuery.trim()
@@ -160,6 +141,7 @@ export default function App() {
     setSelectedId(note.id)
     setMobileView('editor')
     setSidebarView('notes')
+    setSettingsPage('home')
     setSearchQuery('')
     setSearchOpen(false)
     setTimeout(() => titleLineRef.current?.focus(), 50)
@@ -341,8 +323,7 @@ export default function App() {
   }, [handleNewNote, lightboxIndex, selectedNote])
 
   // ── Derived ───────────────────────────────────────────────────────────────
-  const words      = selectedNote ? countWords(selectedNote.body) : 0
-  const totalWords = notes.reduce((s, n) => s + countWords(n.body), 0)
+  const words = selectedNote ? countWords(selectedNote.body) : 0
 
   // ── Split body into title-line and rest ───────────────────────────────────
   const lines     = (selectedNote?.body ?? '').split('\n')
@@ -392,12 +373,26 @@ export default function App() {
         <div className="sidebar-brand">
           {sidebarView === 'settings' ? (
             <>
-              <button className="icon-btn" onClick={() => setSidebarView('notes')} aria-label="Back to notes">
+              <button
+                className="icon-btn"
+                onClick={() => {
+                  if (settingsPage !== 'home') {
+                    setSettingsPage('home')
+                  } else {
+                    setSidebarView('notes')
+                  }
+                }}
+                aria-label={settingsPage !== 'home' ? 'Back to Settings' : 'Back to notes'}
+              >
                 <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
                   <path d="M11 4l-5 5 5 5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"/>
                 </svg>
               </button>
-              <span className="sidebar-brand-name">Settings</span>
+              <span className="sidebar-brand-name">
+                {settingsPage === 'facebook' ? 'FB Page Connector'
+                  : settingsPage === 's3' ? 'S3 / Backup'
+                  : 'Settings'}
+              </span>
             </>
           ) : (
             <>
@@ -424,37 +419,14 @@ export default function App() {
         </div>
 
         {sidebarView === 'settings' ? (
-          <div className="settings-panel">
-            <div className="settings-section">
-              <p className="settings-label">Appearance</p>
-              <div className="settings-theme-toggle">
-                {(['system', 'light', 'dark'] as const).map((t) => (
-                  <button
-                    key={t}
-                    className={`theme-option${theme === t ? ' theme-option--active' : ''}`}
-                    onClick={() => setTheme(t)}
-                  >
-                    {t.charAt(0).toUpperCase() + t.slice(1)}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div className="settings-section">
-              <p className="settings-label">Data</p>
-              <button
-                className="settings-action-btn"
-                onClick={() => exportNotes(notes)}
-                disabled={notes.length === 0}
-              >
-                Export all notes
-              </button>
-            </div>
-            <div className="settings-stats">
-              <span>{notes.length} {notes.length === 1 ? 'note' : 'notes'}</span>
-              <span className="sep">·</span>
-              <span>{totalWords.toLocaleString()} words total</span>
-            </div>
-          </div>
+          <SettingsPanel
+            theme={theme}
+            setTheme={setTheme}
+            notes={notes}
+            onRestoreNotes={restoreNotes}
+            settingsPage={settingsPage}
+            setSettingsPage={setSettingsPage}
+          />
         ) : (
           <>
             <div className={`search-bar${searchOpen ? ' search-bar--open' : ''}`}>
@@ -524,8 +496,8 @@ export default function App() {
               </button>
               <button className="icon-btn" onClick={() => setSidebarView('settings')} aria-label="Settings" title="Settings">
                 <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                  <circle cx="8" cy="8" r="2" stroke="currentColor" strokeWidth="1.4"/>
-                  <path d="M8 1.5V3M8 13v1.5M1.5 8H3M13 8h1.5M3.4 3.4l1.06 1.06M11.54 11.54l1.06 1.06M3.4 12.6l1.06-1.06M11.54 4.46l1.06-1.06" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
+                  <path d="M6.8 2h2.4l.45 1.55c.4.17.77.4 1.1.68l1.55-.45 1.2 2.08-.98.98c.05.28.08.56.08.86s-.03.58-.08.86l.98.98-1.2 2.08-1.55-.45c-.33.28-.7.51-1.1.68L9.2 14H6.8l-.45-1.55a4.3 4.3 0 0 1-1.1-.68l-1.55.45L2.5 10.14l.98-.98A4.23 4.23 0 0 1 3.4 8.3c0-.3.03-.58.08-.86L2.5 6.46 3.7 4.38l1.55.45c.33-.28.7-.51 1.1-.68L6.8 2Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" fill="none"/>
+                  <circle cx="8" cy="8.3" r="1.9" stroke="currentColor" strokeWidth="1.3"/>
                 </svg>
               </button>
             </div>
