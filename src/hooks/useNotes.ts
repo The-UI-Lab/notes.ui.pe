@@ -10,17 +10,6 @@ import {
 const STORAGE_KEY   = 'notes-app-v1';
 const MIGRATION_KEY = 'notes-media-migrated-v1';
 
-/** Coerce a stored fbPost record into a current-shape FbPostInfo
- *  (handles legacy `imageCount` → `mediaCount` rename). */
-function normalizeFbPost(raw: Record<string, unknown>): FbPostInfo {
-  const mediaCount = typeof raw.mediaCount === 'number'
-    ? raw.mediaCount
-    : typeof raw.imageCount === 'number'
-      ? raw.imageCount
-      : 0;
-  return { ...(raw as unknown as FbPostInfo), mediaCount };
-}
-
 interface RawNote {
   id?: unknown;
   title?: unknown;
@@ -55,7 +44,7 @@ function load(): Note[] {
         : [];
       const fbPost =
         n.fbPost && typeof n.fbPost === 'object'
-          ? normalizeFbPost(n.fbPost as Record<string, unknown>)
+          ? (n.fbPost as FbPostInfo)
           : undefined;
       return {
         id:        String(n.id ?? crypto.randomUUID()),
@@ -131,10 +120,10 @@ async function migrateLegacyImages(): Promise<Note[] | null> {
       const content = typeof n.content === 'string' ? n.content : '';
       body = title ? (content ? `${title}\n\n${content}` : title) : content;
     }
-    const fbPost =
-      n.fbPost && typeof n.fbPost === 'object'
-        ? normalizeFbPost(n.fbPost as Record<string, unknown>)
-        : undefined;
+      const fbPost =
+        n.fbPost && typeof n.fbPost === 'object'
+          ? (n.fbPost as FbPostInfo)
+          : undefined;
 
     migrated.push({
       id:        String(n.id ?? crypto.randomUUID()),
