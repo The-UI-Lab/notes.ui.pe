@@ -1,7 +1,10 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useRef, useState, useEffect } from 'react'
 import type { Note } from '../types'
 import { deletePost, pageUrl, postUrl, type FbSettings } from '../utils/facebook'
 import { MediaThumb } from './MediaThumb'
+
+/** Max collapsed height for post body (in px). Roughly ~6 lines. */
+const COLLAPSED_HEIGHT = 120
 
 interface Props {
   notes: Note[]
@@ -22,6 +25,40 @@ function formatRelative(ts: number): string {
 
 function extractTitle(body: string): string {
   return body.split('\n')[0].trim().slice(0, 80) || 'Untitled'
+}
+
+/** Renders post body text with a "See more" / "See less" toggle for long content. */
+function CollapsibleBody({ text }: { text: string }) {
+  const bodyRef = useRef<HTMLDivElement>(null)
+  const [overflows, setOverflows] = useState(false)
+  const [expanded, setExpanded]   = useState(false)
+
+  useEffect(() => {
+    const el = bodyRef.current
+    if (!el) return
+    setOverflows(el.scrollHeight > COLLAPSED_HEIGHT)
+  }, [text])
+
+  const toggle = useCallback(() => setExpanded(e => !e), [])
+
+  return (
+    <div className={`fb-post-body-wrap${overflows && !expanded ? ' fb-post-body-wrap--clamped' : ''}`}>
+      <div
+        ref={bodyRef}
+        className="fb-post-body"
+        style={overflows && !expanded ? { maxHeight: COLLAPSED_HEIGHT, overflow: 'hidden' } : undefined}
+      >
+        {text.split('\n').map((line, i) => (
+          <p key={i}>{line || '\u00A0'}</p>
+        ))}
+      </div>
+      {overflows && (
+        <button className="fb-post-see-more" onClick={toggle}>
+          {expanded ? 'See less' : 'See more'}
+        </button>
+      )}
+    </div>
+  )
 }
 
 export function FacebookFeed({ notes, fb, onOpenNote, onClearFbPost }: Props) {
@@ -115,11 +152,7 @@ export function FacebookFeed({ notes, fb, onOpenNote, onClearFbPost }: Props) {
                   </div>
                 </header>
 
-                <div className="fb-post-body">
-                  {fp.syncedBody.split('\n').map((line, i) => (
-                    <p key={i}>{line || '\u00A0'}</p>
-                  ))}
-                </div>
+                <CollapsibleBody text={fp.syncedBody} />
 
                 {fp.mediaCount > 0 && visibleMedia.length > 0 && (
                   <div className={`fb-post-images fb-post-images--${Math.min(fp.mediaCount, 4)}`}>
