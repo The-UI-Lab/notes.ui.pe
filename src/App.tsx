@@ -1,15 +1,26 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { useNotes } from './hooks/useNotes'
-import type { Note, FbPostInfo } from './types'
+import type { Note, FbPostInfo, MediaRef } from './types'
 import { SettingsPanel } from './components/SettingsPanel'
 import { FacebookFeed } from './components/FacebookFeed'
+import { MediaThumb, useMediaUrl } from './components/MediaThumb'
+import { InstallPrompt } from './components/InstallPrompt'
 import {
   loadFbSettings,
   publishNoteToPage,
   updatePostMessage,
   postUrl,
   type FbSettings,
+  type PublishMedia,
 } from './utils/facebook'
+import {
+  ingestImageFile,
+  ingestVideoFile,
+  toRef,
+  putMedia,
+  getMediaBlob,
+  requestPersistentStorage,
+} from './utils/media'
 import './App.css'
 
 // ── Utilities ────────────────────────────────────────────────────────────────
@@ -79,7 +90,7 @@ function applyTheme(theme: Theme): void {
 export default function App() {
   const {
     notes, createNote, updateNote, deleteNote,
-    addImages, removeImage, restoreNotes,
+    addMedia, removeMedia, restoreNotes,
     setFbPost, clearFbPost,
   } = useNotes()
   const sortedNotes = [...notes].sort((a, b) => b.updatedAt - a.updatedAt)
@@ -106,7 +117,7 @@ export default function App() {
   const restRef      = useRef<HTMLTextAreaElement>(null)
   const notesListRef = useRef<HTMLDivElement>(null)
   const searchInputRef = useRef<HTMLInputElement>(null)
-  const imageInputRef  = useRef<HTMLInputElement>(null)
+  const mediaInputRef  = useRef<HTMLInputElement>(null)
 
   const [searchOpen, setSearchOpen] = useState(false)
 
@@ -124,6 +135,11 @@ export default function App() {
       setFbSettings(loadFbSettings())
     }
   }, [sidebarView, settingsPage])
+
+  // ── Ask for persistent storage on mount (best-effort) ────────────────────
+  useEffect(() => {
+    requestPersistentStorage().catch(() => {})
+  }, [])
 
   // ── Scroll to top on note switch ──────────────────────────────────────────
   useEffect(() => {
@@ -239,14 +255,20 @@ export default function App() {
         }
         setFbPost(selectedNote.id, updated)
       } else {
-        const { id } = await publishNoteToPage(fbSettings, selectedNote.body, selectedNote.images)
+        // Pull blobs out of IDB for upload.
+        const publishMedia: PublishMedia[] = []
+        for (const m of selectedNote.media) {
+          const blob = await getMediaBlob(m.id)
+          if (blob) publishMedia.push({ blob, type: m.type })
+        }
+        const { id } = await publishNoteToPage(fbSettings, selectedNote.body, publishMedia)
         const fbPost: FbPostInfo = {
           id,
           pageId: fbSettings.pageId,
           postedAt: ts,
           lastSyncedAt: ts,
           syncedBody: selectedNote.body,
-          imageCount: selectedNote.images.length,
+          mediaCount: selectedNote.media.length,
           history: [{ ts, body: selectedNote.body, action: 'publish' }],
         }
         setFbPost(selectedNote.id, fbPost)
@@ -266,97 +288,74 @@ export default function App() {
     ta.style.height = `${ta.scrollHeight}px`
   }, [])
 
-  // ── Image handlers ────────────────────────────────────────────────────────
+  // ── Media handlers ────────────────────────────────────────────────────────
 
-  const handleImageUpload = useCallback(
+  const ingestFiles = useCallback(async (files: File[], noteId: string) => {
+    const refs: MediaRef[] = []
+    for (const file of files) {
+      try {
+        const rec = file.type.startsWith('video/')
+          ? await ingestVideoFile(file)
+          : file.type.startsWith('image/')
+            ? await ingestImageFile(file)
+            : null
+        if (!rec) continue
+        await putMedia(rec)
+        refs.push(toRef(rec))
+      } catch (err) {
+        console.error('Failed to ingest media file', err)
+      }
+    }
+    if (refs.length) addMedia(noteId, refs)
+  }, [addMedia])
+
+  const handleMediaUpload = useCallback(
     (files: FileList | null) => {
       if (!files || !selectedNote) return
-      const noteId = selectedNote.id
-      Promise.all(
-        Array.from(files).map(
-          (file) =>
-            new Promise<string | null>((resolve) => {
-              const reader = new FileReader()
-              reader.onload = (ev) => resolve(ev.target?.result as string)
-              reader.onerror = () => resolve(null)
-              reader.readAsDataURL(file)
-            })
-        )
-      ).then((results) => {
-        const dataUrls = results.filter(Boolean) as string[]
-        if (dataUrls.length) addImages(noteId, dataUrls)
-      })
-      // Reset so the same file can be re-selected
-      if (imageInputRef.current) imageInputRef.current.value = ''
+      void ingestFiles(Array.from(files), selectedNote.id)
+      if (mediaInputRef.current) mediaInputRef.current.value = ''
     },
-    [selectedNote, addImages]
+    [selectedNote, ingestFiles]
   )
 
-  const handleImageRemove = useCallback(
+  const handleMediaRemove = useCallback(
     (index: number) => {
       if (!selectedNote) return
-      removeImage(selectedNote.id, index)
+      removeMedia(selectedNote.id, index)
     },
-    [selectedNote, removeImage]
+    [selectedNote, removeMedia]
   )
 
   const handlePaste = useCallback(
     (e: React.ClipboardEvent) => {
       if (!selectedNote) return
-      const imageItems = Array.from(e.clipboardData.items).filter((item) =>
-        item.type.startsWith('image/')
-      )
-      if (!imageItems.length) return
-      const noteId = selectedNote.id
-      Promise.all(
-        imageItems.map(
-          (item) =>
-            new Promise<string | null>((resolve) => {
-              const file = item.getAsFile()
-              if (!file) { resolve(null); return }
-              const reader = new FileReader()
-              reader.onload = (ev) => resolve(ev.target?.result as string)
-              reader.onerror = () => resolve(null)
-              reader.readAsDataURL(file)
-            })
-        )
-      ).then((results) => {
-        const dataUrls = results.filter(Boolean) as string[]
-        if (dataUrls.length) addImages(noteId, dataUrls)
-      })
+      const files = Array.from(e.clipboardData.items)
+        .filter(item => item.type.startsWith('image/') || item.type.startsWith('video/'))
+        .map(item => item.getAsFile())
+        .filter((f): f is File => !!f)
+      if (!files.length) return
+      void ingestFiles(files, selectedNote.id)
     },
-    [selectedNote, addImages]
+    [selectedNote, ingestFiles]
   )
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
       if (!selectedNote) return
-      const imageFiles = Array.from(e.dataTransfer.files).filter((f) =>
-        f.type.startsWith('image/')
+      const files = Array.from(e.dataTransfer.files).filter(
+        f => f.type.startsWith('image/') || f.type.startsWith('video/'),
       )
-      if (!imageFiles.length) return
+      if (!files.length) return
       e.preventDefault()
-      const noteId = selectedNote.id
-      Promise.all(
-        imageFiles.map(
-          (file) =>
-            new Promise<string | null>((resolve) => {
-              const reader = new FileReader()
-              reader.onload = (ev) => resolve(ev.target?.result as string)
-              reader.onerror = () => resolve(null)
-              reader.readAsDataURL(file)
-            })
-        )
-      ).then((results) => {
-        const dataUrls = results.filter(Boolean) as string[]
-        if (dataUrls.length) addImages(noteId, dataUrls)
-      })
+      void ingestFiles(files, selectedNote.id)
     },
-    [selectedNote, addImages]
+    [selectedNote, ingestFiles]
   )
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
-    if (Array.from(e.dataTransfer.items).some((i) => i.type.startsWith('image/'))) {
+    if (Array.from(e.dataTransfer.items).some(
+      i => i.type.startsWith('image/') || i.type.startsWith('video/'),
+    )) {
       e.preventDefault()
       e.dataTransfer.dropEffect = 'copy'
     }
@@ -370,10 +369,10 @@ export default function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (lightboxIndex !== null) {
-        const images = selectedNote?.images ?? []
+        const media = selectedNote?.media ?? []
         if (e.key === 'Escape') { setLightboxIndex(null); return }
-        if (e.key === 'ArrowRight') { setLightboxIndex((lightboxIndex + 1) % images.length); return }
-        if (e.key === 'ArrowLeft') { setLightboxIndex((lightboxIndex - 1 + images.length) % images.length); return }
+        if (e.key === 'ArrowRight') { setLightboxIndex((lightboxIndex + 1) % media.length); return }
+        if (e.key === 'ArrowLeft') { setLightboxIndex((lightboxIndex - 1 + media.length) % media.length); return }
         return
       }
       if ((e.metaKey || e.ctrlKey) && e.key === 'n') {
@@ -659,25 +658,20 @@ export default function App() {
                 spellCheck
               />
 
-              {(selectedNote.images?.length ?? 0) > 0 && (
-                <div className="editor-images" aria-label="Attached images">
-                  {selectedNote.images.map((src, i) => (
-                    <div key={i} className="editor-image-item">
-                      <img
-                        src={src}
-                        alt={`Attachment ${i + 1}`}
+              {selectedNote.media.length > 0 && (
+                <div className="editor-images" aria-label="Attached media">
+                  {selectedNote.media.map((m, i) => (
+                    <div key={m.id} className="editor-image-item">
+                      <MediaThumb
+                        refItem={m}
                         className="editor-image-thumb"
                         onClick={() => setLightboxIndex(i)}
-                        role="button"
-                        tabIndex={0}
-                        onKeyDown={(e) => e.key === 'Enter' && setLightboxIndex(i)}
-                        aria-label={`View image ${i + 1}`}
                       />
                       <button
                         className="editor-image-remove"
-                        onClick={() => handleImageRemove(i)}
-                        aria-label={`Remove image ${i + 1}`}
-                        title="Remove image"
+                        onClick={() => handleMediaRemove(i)}
+                        aria-label={`Remove ${m.type} ${i + 1}`}
+                        title={`Remove ${m.type}`}
                       >
                         <svg width="8" height="8" viewBox="0 0 8 8" fill="none" aria-hidden="true">
                           <path d="M1 1l6 6M7 1L1 7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
@@ -708,9 +702,9 @@ export default function App() {
                 )}
                 <button
                   className="icon-btn"
-                  onClick={() => imageInputRef.current?.click()}
-                  aria-label="Add image"
-                  title="Add image"
+                  onClick={() => mediaInputRef.current?.click()}
+                  aria-label="Add image or video"
+                  title="Add image or video"
                 >
                   <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                     <rect x="1.5" y="3" width="13" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.4"/>
@@ -719,12 +713,12 @@ export default function App() {
                   </svg>
                 </button>
                 <input
-                  ref={imageInputRef}
+                  ref={mediaInputRef}
                   type="file"
-                  accept="image/*"
+                  accept="image/*,video/*"
                   multiple
                   style={{ display: 'none' }}
-                  onChange={(e) => handleImageUpload(e.target.files)}
+                  onChange={(e) => handleMediaUpload(e.target.files)}
                   aria-hidden="true"
                   tabIndex={-1}
                 />
@@ -790,17 +784,18 @@ export default function App() {
 
       {/* ── Lightbox ────────────────────────────────────────────────── */}
       {lightboxIndex !== null && selectedNote && (() => {
-        const images = selectedNote.images ?? []
-        const src = images[lightboxIndex]
-        const hasPrev = images.length > 1
-        const hasNext = images.length > 1
+        const media = selectedNote.media
+        const item  = media[lightboxIndex]
+        const hasPrev = media.length > 1
+        const hasNext = media.length > 1
+        if (!item) return null
         return (
           <div
             className="lightbox-overlay"
             onClick={() => setLightboxIndex(null)}
             role="dialog"
             aria-modal="true"
-            aria-label="Image viewer"
+            aria-label="Media viewer"
           >
             <button className="lightbox-close" onClick={() => setLightboxIndex(null)} aria-label="Close">
               <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
@@ -811,8 +806,8 @@ export default function App() {
             {hasPrev && (
               <button
                 className="lightbox-nav lightbox-nav--prev"
-                onClick={(e) => { e.stopPropagation(); setLightboxIndex((lightboxIndex - 1 + images.length) % images.length) }}
-                aria-label="Previous image"
+                onClick={(e) => { e.stopPropagation(); setLightboxIndex((lightboxIndex - 1 + media.length) % media.length) }}
+                aria-label="Previous"
               >
                 <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
                   <path d="M11 4l-5 5 5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
@@ -820,18 +815,13 @@ export default function App() {
               </button>
             )}
 
-            <img
-              src={src}
-              alt={`Attachment ${lightboxIndex + 1}`}
-              className="lightbox-img"
-              onClick={(e) => e.stopPropagation()}
-            />
+            <LightboxItem refItem={item} index={lightboxIndex} />
 
             {hasNext && (
               <button
                 className="lightbox-nav lightbox-nav--next"
-                onClick={(e) => { e.stopPropagation(); setLightboxIndex((lightboxIndex + 1) % images.length) }}
-                aria-label="Next image"
+                onClick={(e) => { e.stopPropagation(); setLightboxIndex((lightboxIndex + 1) % media.length) }}
+                aria-label="Next"
               >
                 <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
                   <path d="M7 4l5 5-5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
@@ -839,14 +829,14 @@ export default function App() {
               </button>
             )}
 
-            {images.length > 1 && (
+            {media.length > 1 && (
               <div className="lightbox-dots" onClick={(e) => e.stopPropagation()}>
-                {images.map((_, i) => (
+                {media.map((m, i) => (
                   <button
-                    key={i}
+                    key={m.id}
                     className={`lightbox-dot${i === lightboxIndex ? ' lightbox-dot--active' : ''}`}
                     onClick={() => setLightboxIndex(i)}
-                    aria-label={`Go to image ${i + 1}`}
+                    aria-label={`Go to ${i + 1}`}
                   />
                 ))}
               </div>
@@ -854,6 +844,34 @@ export default function App() {
           </div>
         )
       })()}
+
+      <InstallPrompt />
     </>
+  )
+}
+
+// ── Lightbox item — pulls blob URL from IDB ─────────────────────────────────
+function LightboxItem({ refItem, index }: { refItem: MediaRef; index: number }) {
+  const url = useMediaUrl(refItem.id)
+  if (!url) return <div className="lightbox-img lightbox-img--loading" />
+  if (refItem.type === 'video') {
+    return (
+      <video
+        src={url}
+        controls
+        autoPlay
+        playsInline
+        className="lightbox-img"
+        onClick={(e) => e.stopPropagation()}
+      />
+    )
+  }
+  return (
+    <img
+      src={url}
+      alt={`Attachment ${index + 1}`}
+      className="lightbox-img"
+      onClick={(e) => e.stopPropagation()}
+    />
   )
 }

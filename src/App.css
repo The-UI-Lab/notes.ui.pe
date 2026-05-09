@@ -1521,3 +1521,210 @@
   word-break: break-word;
   line-height: 1.45;
 }
+
+/* ── Media thumbs (image + video) ─────────────────────────────────────────── */
+
+.media-thumb {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.media-thumb--video {
+  position: relative;
+  background: oklch(15% 0 0);
+  width: 100%;
+  height: 100%;
+}
+
+.media-thumb--video video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.media-thumb-fallback {
+  width: 100%;
+  height: 100%;
+  background: var(--item-active);
+}
+
+.media-thumb-play {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  filter: drop-shadow(0 1px 4px rgba(0,0,0,0.4));
+}
+
+.lightbox-img--loading {
+  width: 200px;
+  height: 200px;
+  background: var(--item-active);
+  border-radius: var(--r-md);
+  animation: lightbox-loading 1.4s ease-in-out infinite;
+}
+
+@keyframes lightbox-loading {
+  0%, 100% { opacity: 0.4 }
+  50%      { opacity: 0.8 }
+}
+
+/* ── Storage meter ────────────────────────────────────────────────────────── */
+
+.storage-meter {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.storage-meter-bar {
+  height: 6px;
+  background: var(--item-hover);
+  border-radius: 100px;
+  overflow: hidden;
+}
+
+.storage-meter-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 100px;
+  transition: width 220ms cubic-bezier(0.2, 0, 0, 1);
+}
+
+.storage-meter-fill--warn {
+  background: var(--danger);
+}
+
+.storage-meter-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.storage-meter-tag {
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+  background: var(--item-hover);
+  padding: 2px 7px;
+  border-radius: 100px;
+}
+
+.storage-meter-tag--ok {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+/* ── Install banner ──────────────────────────────────────────────────────── */
+
+.install-banner {
+  position: fixed;
+  left: 16px;
+  right: 16px;
+  bottom: max(16px, env(safe-area-inset-bottom, 0px));
+  z-index: 600;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  box-shadow: 0 12px 32px oklch(0% 0 0 / 0.18);
+  animation: install-in 320ms cubic-bezier(0.2, 0, 0, 1);
+  max-width: 480px;
+  margin-inline: auto;
+}
+
+@keyframes install-in {
+  from { transform: translateY(20px); opacity: 0 }
+  to   { transform: translateY(0);    opacity: 1 }
+}
+
+.install-banner-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--r-sm);
+  background: var(--accent-soft);
+  color: var(--accent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.install-banner-text {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.install-banner-text strong {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+
+.install-banner-text span {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.install-banner-text em {
+  font-style: normal;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.install-banner-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.install-banner-cta {
+  padding: 7px 13px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--accent-text);
+  background: var(--accent);
+  border: none;
+  border-radius: var(--r-sm);
+  transition: background var(--ease);
+}
+
+.install-banner-cta:hover {
+  background: var(--accent-hover);
+}
+
+.install-banner-dismiss {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r-sm);
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--ease), color var(--ease);
+}
+
+.install-banner-dismiss:hover {
+  background: var(--item-hover);
+  color: var(--text);
+}

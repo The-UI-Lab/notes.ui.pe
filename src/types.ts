@@ -10,14 +10,27 @@ export interface FbPostInfo {
   postedAt: number;      // first publish timestamp
   lastSyncedAt: number;  // last successful publish/update
   syncedBody: string;    // body that matches what's on Facebook right now
-  imageCount: number;    // images on FB (from initial publish; not editable later)
+  mediaCount: number;    // media items on FB (from initial publish; not editable later)
   history: FbPostHistoryEntry[];
+}
+
+export type MediaType = 'image' | 'video';
+
+export interface MediaRef {
+  id: string;
+  type: MediaType;
+  mime: string;
+  size: number;
+  width?: number;
+  height?: number;
+  durationMs?: number;
 }
 
 export interface Note {
   id: string;
   body: string;
-  images: string[]; // base64 data URLs stored in localStorage
+  /** References to blobs stored in IndexedDB (see utils/media.ts). */
+  media: MediaRef[];
   createdAt: number;
   updatedAt: number;
   fbPost?: FbPostInfo;

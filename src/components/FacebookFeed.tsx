@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import type { Note } from '../types'
 import { deletePost, pageUrl, postUrl, type FbSettings } from '../utils/facebook'
+import { MediaThumb } from './MediaThumb'
 
 interface Props {
   notes: Note[]
@@ -93,6 +94,7 @@ export function FacebookFeed({ notes, fb, onOpenNote, onClearFbPost }: Props) {
             const fp = note.fbPost
             const drift = note.body.trim() !== fp.syncedBody.trim()
             const expanded = !!expandedHistory[note.id]
+            const visibleMedia = note.media.slice(0, Math.min(fp.mediaCount, 4))
             return (
               <article key={note.id} className="fb-post-card">
                 <header className="fb-post-head">
@@ -119,13 +121,13 @@ export function FacebookFeed({ notes, fb, onOpenNote, onClearFbPost }: Props) {
                   ))}
                 </div>
 
-                {fp.imageCount > 0 && (
-                  <div className={`fb-post-images fb-post-images--${Math.min(fp.imageCount, 4)}`}>
-                    {note.images.slice(0, Math.min(fp.imageCount, 4)).map((src, i) => (
-                      <div key={i} className="fb-post-image">
-                        <img src={src} alt="" />
-                        {i === 3 && fp.imageCount > 4 && (
-                          <span className="fb-post-image-more">+{fp.imageCount - 4}</span>
+                {fp.mediaCount > 0 && visibleMedia.length > 0 && (
+                  <div className={`fb-post-images fb-post-images--${Math.min(fp.mediaCount, 4)}`}>
+                    {visibleMedia.map((m, i) => (
+                      <div key={m.id} className="fb-post-image">
+                        <MediaThumb refItem={m} />
+                        {i === 3 && fp.mediaCount > 4 && (
+                          <span className="fb-post-image-more">+{fp.mediaCount - 4}</span>
                         )}
                       </div>
                     ))}

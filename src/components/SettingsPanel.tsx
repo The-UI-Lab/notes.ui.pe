@@ -8,6 +8,17 @@ import {
   type BackupItem,
   type S3Config,
 } from '../utils/s3'
+import {
+  getAllMedia,
+  putMedia,
+  blobToBase64,
+  base64ToBlob,
+  getStorageInfo,
+  requestPersistentStorage,
+  pruneOrphans,
+  type MediaRecord,
+  type StorageInfo,
+} from '../utils/media'
 
 // ── Export helper ──────────────────────────────────────────────────────────
 
@@ -40,6 +51,24 @@ export type Theme = 'system' | 'light' | 'dark'
 interface FbSettings {
   accessToken: string
   pageId: string
+}
+
+interface BackupMedia {
+  id: string
+  type: 'image' | 'video'
+  mime: string
+  size: number
+  width?: number
+  height?: number
+  durationMs?: number
+  createdAt: number
+  data: string  // base64-encoded blob bytes
+}
+
+interface BackupPayload {
+  v: 2
+  notes: Note[]
+  media: BackupMedia[]
 }
 
 // ── Persistence keys ───────────────────────────────────────────────────────
@@ -114,6 +143,15 @@ export function SettingsPanel({
   const [pwdError,    setPwdError]    = useState('')
   const [opRunning,   setOpRunning]   = useState(false)
 
+  // ── Storage info ───────────────────────────────────────────────────────
+  const [storage, setStorage] = useState<StorageInfo>({ usage: null, quota: null, persisted: false })
+  const refreshStorage = useCallback(() => {
+    getStorageInfo().then(setStorage).catch(() => {})
+  }, [])
+  useEffect(() => {
+    if (settingsPage === 'home') refreshStorage()
+  }, [settingsPage, notes.length, refreshStorage])
+
   const s3Complete = Boolean(s3.bucket && s3.region && s3.accessKeyId && s3.secretAccessKey)
 
   // ── Load backups whenever we enter the S3 page with valid creds ────────
@@ -174,21 +212,59 @@ export function SettingsPanel({
     setPwdError('')
     try {
       if (modal.mode === 'backup') {
-        const payload  = JSON.stringify(notes)
-        const blob     = await encryptBackup(password, payload)
-        const key      = `notes-backup-${new Date().toISOString().replace(/[:.]/g, '-')}.enc`
+        // Bundle notes + every media blob referenced by them.
+        const referencedIds = new Set(notes.flatMap(n => n.media.map(m => m.id)))
+        const all = await getAllMedia()
+        const mediaBundle: BackupMedia[] = []
+        for (const rec of all) {
+          if (!referencedIds.has(rec.id)) continue
+          mediaBundle.push({
+            id: rec.id,
+            mime: rec.mime,
+            type: rec.type,
+            size: rec.size,
+            width: rec.width,
+            height: rec.height,
+            durationMs: rec.durationMs,
+            createdAt: rec.createdAt,
+            data: await blobToBase64(rec.blob),
+          })
+        }
+        const payload = JSON.stringify({ v: 2, notes, media: mediaBundle } satisfies BackupPayload)
+        const blob    = await encryptBackup(password, payload)
+        const key     = `notes-backup-${new Date().toISOString().replace(/[:.]/g, '-')}.enc`
         await uploadBackup(s3, key, blob)
-        setS3Status({ ok: true, msg: 'Backup uploaded successfully.' })
+        setS3Status({ ok: true, msg: `Backup uploaded (${notes.length} notes, ${mediaBundle.length} media).` })
         setModal(null)
         setPassword('')
         setBackupsLoaded(false)
         fetchBackups(s3)
       } else if (modal.mode === 'restore' && modal.key) {
-        const blob      = await downloadBackup(s3, modal.key)
-        const json      = await decryptBackup(password, blob)
-        const restored  = JSON.parse(json) as Note[]
-        onRestoreNotes(restored)
-        setS3Status({ ok: true, msg: `Restored ${restored.length} note(s) successfully.` })
+        const blob = await downloadBackup(s3, modal.key)
+        const json = await decryptBackup(password, blob)
+        const parsed = JSON.parse(json) as BackupPayload | Note[]
+        const restoredNotes = Array.isArray(parsed) ? parsed : parsed.notes
+        const restoredMedia = Array.isArray(parsed) ? [] : (parsed.media ?? [])
+        // Write blobs back into IDB before swapping notes.
+        for (const m of restoredMedia) {
+          const rec: MediaRecord = {
+            id: m.id,
+            type: m.type,
+            mime: m.mime,
+            blob: base64ToBlob(m.data, m.mime),
+            size: m.size,
+            width: m.width,
+            height: m.height,
+            durationMs: m.durationMs,
+            createdAt: m.createdAt,
+          }
+          await putMedia(rec)
+        }
+        onRestoreNotes(restoredNotes)
+        // Drop any orphan media that's not referenced by the restored notes.
+        const restoredRefs = new Set(restoredNotes.flatMap(n => (n.media ?? []).map(m => m.id)))
+        await pruneOrphans(restoredRefs).catch(() => {})
+        setS3Status({ ok: true, msg: `Restored ${restoredNotes.length} note(s) and ${restoredMedia.length} media file(s).` })
         setModal(null)
         setPassword('')
       }
@@ -258,6 +334,23 @@ export function SettingsPanel({
 
         <div className="settings-stats">
           <span>{notes.length} {notes.length === 1 ? 'note' : 'notes'}</span>
+        </div>
+
+        <div className="settings-section">
+          <p className="settings-label">Storage</p>
+          <StorageMeter storage={storage} />
+          {!storage.persisted && (
+            <button
+              className="settings-action-btn"
+              onClick={async () => {
+                await requestPersistentStorage()
+                refreshStorage()
+              }}
+              style={{ marginTop: 8 }}
+            >
+              Request persistent storage
+            </button>
+          )}
         </div>
 
         <div className="settings-section">
@@ -517,6 +610,38 @@ export function SettingsPanel({
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+// ── StorageMeter ─────────────────────────────────────────────────────────────
+
+function formatBytes(n: number | null): string {
+  if (n === null || !Number.isFinite(n)) return '—'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let i = 0
+  let v = n
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++ }
+  return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${units[i]}`
+}
+
+function StorageMeter({ storage }: { storage: StorageInfo }) {
+  const { usage, quota, persisted } = storage
+  const pct = usage != null && quota && quota > 0 ? Math.min(100, (usage / quota) * 100) : 0
+  return (
+    <div className="storage-meter">
+      <div className="storage-meter-bar" aria-hidden="true">
+        <div
+          className={`storage-meter-fill${pct > 85 ? ' storage-meter-fill--warn' : ''}`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <div className="storage-meter-row">
+        <span>{formatBytes(usage)} of {formatBytes(quota)}</span>
+        <span className={persisted ? 'storage-meter-tag storage-meter-tag--ok' : 'storage-meter-tag'}>
+          {persisted ? 'Persistent' : 'Best-effort'}
+        </span>
+      </div>
     </div>
   )
 }

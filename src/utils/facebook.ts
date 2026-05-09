@@ -1,11 +1,17 @@
 /**
  * Facebook Graph API helpers — minimal browser-side client for posting to a
- * Page from the user's stored access token. CORS is supported by graph.facebook.com
- * for these endpoints, so we can call them directly without a backend.
+ * Page from the user's stored access token. CORS is supported for these
+ * endpoints, so we can call them directly without a backend.
  *
- * Important limitation we surface to callers:
- *   - Updating an existing post can change the *message* only. Photos attached
- *     to a post cannot be added/removed/replaced via Graph API after publish.
+ * Supported post shapes:
+ *   - text-only         → POST /{page}/feed
+ *   - 1 image           → POST /{page}/photos (with caption)
+ *   - 2+ images         → POST /{page}/photos (published=false) for each,
+ *                          then POST /{page}/feed with attached_media
+ *   - 1 video           → POST /{page}/videos (with description)
+ *
+ * Mixing images + videos in a single Page post is not supported by the
+ * Graph API and is rejected before upload.
  */
 
 const GRAPH = 'https://graph.facebook.com/v19.0'
@@ -13,6 +19,11 @@ const GRAPH = 'https://graph.facebook.com/v19.0'
 export interface FbSettings {
   accessToken: string
   pageId: string
+}
+
+export interface PublishMedia {
+  blob: Blob
+  type: 'image' | 'video'
 }
 
 const FB_KEY = 'notes-fb-v1'
@@ -29,12 +40,6 @@ export function loadFbSettings(): FbSettings | null {
   }
 }
 
-/** Convert a data URL to a Blob (for multipart uploads). */
-async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
-  const res = await fetch(dataUrl)
-  return res.blob()
-}
-
 interface GraphError {
   error?: { message?: string; code?: number; type?: string }
 }
@@ -48,20 +53,50 @@ async function graphFetch<T>(url: string, init?: RequestInit): Promise<T> {
   return json
 }
 
+function extension(mime: string, fallback: string): string {
+  const m = /\/([a-z0-9]+)/i.exec(mime)
+  return m ? m[1].toLowerCase() : fallback
+}
+
 /**
  * Publishes a note to the connected Facebook Page.
- *
- * Returns the canonical post id (e.g. `{pageId}_{postId}`) and a URL.
+ * Returns the canonical post id (e.g. `{pageId}_{postId}`).
  */
 export async function publishNoteToPage(
   settings: FbSettings,
   message: string,
-  images: string[],
+  media: PublishMedia[],
 ): Promise<{ id: string; url: string }> {
   const { accessToken, pageId } = settings
   const trimmed = message.trim()
 
-  // ── No images → simple feed post ────────────────────────────────────────
+  const images = media.filter(m => m.type === 'image')
+  const videos = media.filter(m => m.type === 'video')
+
+  if (images.length && videos.length) {
+    throw new Error('Cannot post images and videos together. Keep one or the other.')
+  }
+  if (videos.length > 1) {
+    throw new Error('Only one video per post is supported.')
+  }
+
+  // ── Single video ─────────────────────────────────────────────────────────
+  if (videos.length === 1) {
+    const v = videos[0]
+    const form = new FormData()
+    form.append('source', v.blob, `video.${extension(v.blob.type, 'mp4')}`)
+    if (trimmed) form.append('description', trimmed)
+    form.append('access_token', accessToken)
+    const json = await graphFetch<{ id: string }>(
+      `${GRAPH}/${encodeURIComponent(pageId)}/videos`,
+      { method: 'POST', body: form },
+    )
+    // Graph returns just the video id; the wrapping post id surfaces shortly
+    // after — we still link to the video directly.
+    return { id: json.id, url: `https://www.facebook.com/${json.id}` }
+  }
+
+  // ── No media → text-only feed post ───────────────────────────────────────
   if (images.length === 0) {
     if (!trimmed) throw new Error('Cannot publish an empty note.')
     const form = new FormData()
@@ -74,11 +109,11 @@ export async function publishNoteToPage(
     return { id: json.id, url: `https://www.facebook.com/${json.id}` }
   }
 
-  // ── Single image → /photos with caption ─────────────────────────────────
+  // ── Single image → /photos with caption ──────────────────────────────────
   if (images.length === 1) {
-    const blob = await dataUrlToBlob(images[0])
+    const img = images[0]
     const form = new FormData()
-    form.append('source', blob, 'image.jpg')
+    form.append('source', img.blob, `image.${extension(img.blob.type, 'jpg')}`)
     if (trimmed) form.append('caption', trimmed)
     form.append('access_token', accessToken)
     const json = await graphFetch<{ id: string; post_id?: string }>(
@@ -89,12 +124,11 @@ export async function publishNoteToPage(
     return { id, url: `https://www.facebook.com/${id}` }
   }
 
-  // ── Multiple images → upload each unpublished, then attach to feed ──────
+  // ── Multiple images → upload each unpublished, then attach to feed ───────
   const mediaIds: string[] = []
-  for (const dataUrl of images) {
-    const blob = await dataUrlToBlob(dataUrl)
+  for (const img of images) {
     const form = new FormData()
-    form.append('source', blob, 'image.jpg')
+    form.append('source', img.blob, `image.${extension(img.blob.type, 'jpg')}`)
     form.append('published', 'false')
     form.append('access_token', accessToken)
     const json = await graphFetch<{ id: string }>(
@@ -117,7 +151,7 @@ export async function publishNoteToPage(
   return { id: post.id, url: `https://www.facebook.com/${post.id}` }
 }
 
-/** Updates the message of an existing post. Photos cannot be changed. */
+/** Updates the message of an existing post. Photos/videos cannot be changed. */
 export async function updatePostMessage(
   settings: FbSettings,
   postId: string,
@@ -132,7 +166,6 @@ export async function updatePostMessage(
   })
 }
 
-/** Deletes a post from the connected page. */
 export async function deletePost(
   settings: FbSettings,
   postId: string,
