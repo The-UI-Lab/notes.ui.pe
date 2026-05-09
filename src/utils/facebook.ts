@@ -181,3 +181,103 @@ export function postUrl(postId: string): string {
 export function pageUrl(pageId: string): string {
   return `https://www.facebook.com/${encodeURIComponent(pageId)}`
 }
+
+// ── Insights ─────────────────────────────────────────────────────────────────
+
+import type { FbPostInsight, FbPageInsightsSummary } from '../types'
+
+/** Metrics we ask the Graph API for on each post. */
+const POST_INSIGHT_METRICS = [
+  'post_impressions',
+  'post_impressions_unique',
+  'post_engaged_users',
+  'post_clicks',
+  'post_reactions_by_type_total',
+].join(',')
+
+interface InsightValue {
+  name: string
+  values: { value: number | Record<string, number> }[]
+}
+
+interface PostFieldsResponse {
+  shares?: { count: number }
+  comments?: { summary?: { total_count: number } }
+}
+
+/**
+ * Fetch insight metrics for a single post.
+ * Note: Insights are only available for posts on Pages (not personal profiles)
+ * and may be empty for very recent or very low-reach posts.
+ */
+export async function fetchPostInsights(
+  settings: FbSettings,
+  postId: string,
+): Promise<FbPostInsight> {
+  const esc = encodeURIComponent
+  const base = `${GRAPH}/${esc(postId)}`
+  const token = esc(settings.accessToken)
+
+  // Fetch insights + basic engagement fields in parallel
+  const [insightsJson, fieldsJson] = await Promise.all([
+    graphFetch<{ data: InsightValue[] }>(
+      `${base}/insights?metric=${POST_INSIGHT_METRICS}&access_token=${token}`,
+    ).catch(() => ({ data: [] as InsightValue[] })),
+    graphFetch<PostFieldsResponse>(
+      `${base}?fields=shares,comments.summary(true).limit(0)&access_token=${token}`,
+    ).catch(() => ({} as PostFieldsResponse)),
+  ])
+
+  const m = new Map(insightsJson.data.map(d => [d.name, d.values[0]?.value ?? 0]))
+
+  const raw = (name: string): number => {
+    const v = m.get(name)
+    if (typeof v === 'number') return v
+    if (typeof v === 'object') return Object.values(v).reduce((a, b) => a + b, 0)
+    return 0
+  }
+
+  return {
+    postId,
+    fetchedAt: Date.now(),
+    impressions: raw('post_impressions'),
+    reach: raw('post_impressions_unique'),
+    engagedUsers: raw('post_engaged_users'),
+    clicks: raw('post_clicks'),
+    reactions: raw('post_reactions_by_type_total'),
+    comments: fieldsJson.comments?.summary?.total_count ?? 0,
+    shares: fieldsJson.shares?.count ?? 0,
+  }
+}
+
+interface PageInsightValue {
+  name: string
+  values: { value: number; end_time: string }[]
+}
+
+/**
+ * Fetch page-level daily reach & impressions for the last 28 days.
+ * Useful for the trend sparkline in the insights panel.
+ */
+export async function fetchPageDailyMetrics(
+  settings: FbSettings,
+): Promise<{ dailyReach: { date: string; value: number }[]; dailyImpressions: { date: string; value: number }[] }> {
+  const esc = encodeURIComponent
+  const token = esc(settings.accessToken)
+  const pageId = esc(settings.pageId)
+
+  const json = await graphFetch<{ data: PageInsightValue[] }>(
+    `${GRAPH}/${pageId}/insights?metric=page_impressions,page_impressions_unique&period=day&access_token=${token}`,
+  ).catch(() => ({ data: [] as PageInsightValue[] }))
+
+  const extract = (name: string) =>
+    (json.data.find(d => d.name === name)?.values ?? []).map(v => ({
+      date: v.end_time.slice(0, 10),
+      value: v.value,
+    }))
+
+  return {
+    dailyImpressions: extract('page_impressions'),
+    dailyReach: extract('page_impressions_unique'),
+  }
+}

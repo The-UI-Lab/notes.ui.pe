@@ -35,3 +35,30 @@ export interface Note {
   updatedAt: number;
   fbPost?: FbPostInfo;
 }
+
+// ── Facebook Insights ──────────────────────────────────────────────────────
+
+/** Per-post insight metrics cached locally. */
+export interface FbPostInsight {
+  postId: string;
+  fetchedAt: number;            // timestamp of last fetch
+  impressions: number;          // post_impressions (total views)
+  reach: number;                // post_impressions_unique (unique viewers)
+  engagedUsers: number;         // post_engaged_users
+  reactions: number;            // post_reactions_by_type_total (sum)
+  comments: number;             // from post object
+  shares: number;               // from post object
+  clicks: number;               // post_clicks (total)
+}
+
+/** Aggregate page-level summary cached locally. */
+export interface FbPageInsightsSummary {
+  fetchedAt: number;
+  totalPosts: number;
+  totalImpressions: number;
+  totalReach: number;
+  totalEngagement: number;
+  /** Per-day aggregates for the sparkline trend (most recent 28 days). */
+  dailyReach: { date: string; value: number }[];
+  dailyImpressions: { date: string; value: number }[];
+}

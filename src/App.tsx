@@ -3,6 +3,7 @@ import { useNotes } from './hooks/useNotes'
 import type { Note, FbPostInfo, MediaRef } from './types'
 import { SettingsPanel } from './components/SettingsPanel'
 import { FacebookFeed } from './components/FacebookFeed'
+import { FacebookInsights } from './components/FacebookInsights'
 import { MediaThumb, useMediaUrl } from './components/MediaThumb'
 import { InstallPrompt } from './components/InstallPrompt'
 import {
@@ -97,7 +98,7 @@ export default function App() {
 
   const [selectedId,    setSelectedId]    = useState<string | null>(() => sortedNotes[0]?.id ?? null)
   const [mobileView,    setMobileView]    = useState<'list' | 'editor'>('list')
-  const [sidebarView,   setSidebarView]   = useState<'notes' | 'settings' | 'facebook'>('notes')
+  const [sidebarView,   setSidebarView]   = useState<'notes' | 'settings' | 'facebook' | 'fb-insights'>('notes')
   const [settingsPage,  setSettingsPage]  = useState<'home' | 'facebook' | 's3'>('home')
   const [fbSettings,    setFbSettings]    = useState<FbSettings | null>(loadFbSettings)
   const [fbBusy,        setFbBusy]        = useState(false)
@@ -469,6 +470,19 @@ export default function App() {
               </button>
               <span className="sidebar-brand-name">Page Feed</span>
             </>
+          ) : sidebarView === 'fb-insights' ? (
+            <>
+              <button
+                className="icon-btn"
+                onClick={() => setSidebarView('facebook')}
+                aria-label="Back to feed"
+              >
+                <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                  <path d="M11 4l-5 5 5 5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+              </button>
+              <span className="sidebar-brand-name">Insights</span>
+            </>
           ) : (
             <>
               <svg className="sidebar-brand-icon" width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
@@ -512,6 +526,13 @@ export default function App() {
               setMobileView('editor')
             }}
             onClearFbPost={clearFbPost}
+            onOpenInsights={() => setSidebarView('fb-insights')}
+          />
+        ) : sidebarView === 'fb-insights' && fbSettings ? (
+          <FacebookInsights
+            notes={notes}
+            fb={fbSettings}
+            onBack={() => setSidebarView('facebook')}
           />
         ) : (
           <>

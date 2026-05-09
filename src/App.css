@@ -1556,6 +1556,257 @@
   line-height: 1.45;
 }
 
+/* ── Facebook Insights ─────────────────────────────────────────────────────── */
+
+.fb-insights {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.fb-insights-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.fb-insights-fetch-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: none;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: background var(--ease), opacity var(--ease);
+}
+
+.fb-insights-fetch-btn:hover:not(:disabled) {
+  background: var(--accent);
+  color: white;
+}
+
+.fb-insights-fetch-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.fb-insights-fetch-btn--busy {
+  opacity: 0.7;
+}
+
+@keyframes fb-spin {
+  to { transform: rotate(360deg); }
+}
+
+.fb-insights-spin {
+  animation: fb-spin 0.8s linear infinite;
+}
+
+.fb-insights-updated {
+  font-size: 10.5px;
+  color: var(--text-faint);
+  margin-left: auto;
+}
+
+.fb-insights-error {
+  padding: 6px 14px;
+  font-size: 11.5px;
+  color: var(--danger);
+  background: var(--danger-bg);
+}
+
+.fb-insights-progress {
+  padding: 4px 14px;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.fb-insights-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 12px 20px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+/* Empty state */
+
+.fb-insights-empty {
+  text-align: center;
+  padding: 40px 16px 20px;
+  color: var(--text-faint);
+}
+
+.fb-insights-empty-icon {
+  margin-bottom: 10px;
+  color: var(--text-faint);
+  opacity: 0.6;
+}
+
+.fb-insights-empty-text {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+.fb-insights-empty-sub {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* Summary cards */
+
+.fb-insights-summary {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.fb-insights-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 12px 8px 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+
+.fb-insights-stat-value {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+}
+
+.fb-insights-stat-label {
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-top: 2px;
+}
+
+/* Trend sparklines */
+
+.fb-insights-trends {
+  margin-bottom: 16px;
+}
+
+.fb-insights-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 0 0 8px;
+}
+
+.fb-insights-trend-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+}
+
+.fb-insights-trend-label {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text-muted);
+  min-width: 76px;
+  flex-shrink: 0;
+}
+
+.fb-insights-sparkline {
+  flex: 1;
+  max-width: 160px;
+}
+
+/* Per-post rows */
+
+.fb-insights-posts {
+  margin-top: 4px;
+}
+
+.fb-insights-post-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.fb-insights-post-row:last-child {
+  border-bottom: none;
+}
+
+.fb-insights-post-info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.fb-insights-post-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fb-insights-post-meta {
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+.fb-insights-post-metrics {
+  display: flex;
+  align-items: center;
+}
+
+.fb-insights-post-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.fb-insights-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 7px;
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: var(--item-hover);
+  border-radius: 100px;
+}
+
+.fb-insights-pill--muted {
+  color: var(--text-faint);
+  background: transparent;
+  padding-left: 0;
+}
+
+.fb-insights-post-no-data {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
 /* ── Media thumbs (image + video) ─────────────────────────────────────────── */
 
 .media-thumb {

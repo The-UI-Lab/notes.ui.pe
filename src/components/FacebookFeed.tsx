@@ -11,6 +11,7 @@ interface Props {
   fb: FbSettings
   onOpenNote: (id: string) => void
   onClearFbPost: (noteId: string) => void
+  onOpenInsights?: () => void
 }
 
 function formatRelative(ts: number): string {
@@ -61,7 +62,7 @@ function CollapsibleBody({ text }: { text: string }) {
   )
 }
 
-export function FacebookFeed({ notes, fb, onOpenNote, onClearFbPost }: Props) {
+export function FacebookFeed({ notes, fb, onOpenNote, onClearFbPost, onOpenInsights }: Props) {
   const published = useMemo(
     () => notes
       .filter((n): n is Note & { fbPost: NonNullable<Note['fbPost']> } => Boolean(n.fbPost))
@@ -105,6 +106,20 @@ export function FacebookFeed({ notes, fb, onOpenNote, onClearFbPost }: Props) {
             <span className="fb-feed-page-title">Your Page</span>
             <span className="fb-feed-page-sub">{published.length} {published.length === 1 ? 'post' : 'posts'} from Notes</span>
           </div>
+          {onOpenInsights && (
+            <button
+              className="fb-feed-open-link"
+              onClick={onOpenInsights}
+              title="View Insights"
+              aria-label="View Insights"
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <rect x="1.5" y="9" width="3" height="5.5" rx="0.7" stroke="currentColor" strokeWidth="1.2"/>
+                <rect x="6.5" y="5" width="3" height="9.5" rx="0.7" stroke="currentColor" strokeWidth="1.2"/>
+                <rect x="11.5" y="1.5" width="3" height="13" rx="0.7" stroke="currentColor" strokeWidth="1.2"/>
+              </svg>
+            </button>
+          )}
           <a
             href={pageUrl(fb.pageId)}
             target="_blank"
