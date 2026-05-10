@@ -2101,3 +2101,9 @@
   font-size: 11px;
   color: var(--text-faint);
 }
+
+.sync-device-count {
+  font-size: 11px;
+  color: var(--accent);
+  font-weight: 600;
+}

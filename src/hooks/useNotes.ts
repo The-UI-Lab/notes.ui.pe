@@ -12,12 +12,11 @@ import {
   syncDeleteNote,
   startSync,
   stopSync,
-  syncOnce,
+  triggerSync as syncTrigger,
   getLastSyncTime,
   type SyncState,
   type SyncCallbacks,
 } from '../utils/sync';
-import type { S3Config } from '../utils/s3';
 
 const STORAGE_KEY   = 'notes-app-v1';
 const MIGRATION_KEY = 'notes-media-migrated-v1';
@@ -159,21 +158,19 @@ export function useNotes() {
     status: isSyncEnabled() ? 'idle' : 'disabled',
     lastSync: getLastSyncTime(),
     error: null,
+    deviceCount: 0,
   });
   const notesRef = useRef(notes);
   notesRef.current = notes;
   const pushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const s3ConfigRef = useRef<S3Config | null>(null);
 
-  // Debounced push: waits 3s after last change before syncing to S3
+  // Debounced push: waits 1.5s after last change before syncing via WebSocket
   const schedulePush = useCallback((note: Note) => {
-    if (!isSyncEnabled() || !s3ConfigRef.current) return;
+    if (!isSyncEnabled()) return;
     if (pushTimerRef.current) clearTimeout(pushTimerRef.current);
     pushTimerRef.current = setTimeout(() => {
-      if (s3ConfigRef.current) {
-        syncPushSingle(note, s3ConfigRef.current).catch(() => {});
-      }
-    }, 3000);
+      syncPushSingle(note).catch(() => {});
+    }, 1500);
   }, []);
 
   useEffect(() => {
@@ -221,10 +218,8 @@ export function useNotes() {
       }
       const next = prev.filter((n) => n.id !== id);
       persist(next);
-      // Push deletion to S3
-      if (s3ConfigRef.current) {
-        syncDeleteNote(id, s3ConfigRef.current).catch(() => {});
-      }
+      // Push deletion via sync
+      syncDeleteNote(id).catch(() => {});
       return next;
     });
   }, []);
@@ -285,18 +280,37 @@ export function useNotes() {
 
   // ── Sync lifecycle ──────────────────────────────────────────────────────
 
-  const initSync = useCallback((s3: S3Config) => {
-    s3ConfigRef.current = s3;
+  const initSync = useCallback(() => {
     if (!isSyncEnabled()) return;
-    const callbacks: SyncCallbacks = {
+    const cbs: SyncCallbacks = {
       getNotes: () => notesRef.current,
       onNotesChanged: (merged) => {
         persist(merged);
         setNotes(merged);
       },
+      onNoteUpdated: (note) => {
+        setNotes((prev) => {
+          const exists = prev.find(n => n.id === note.id);
+          let next: Note[];
+          if (exists) {
+            next = prev.map(n => n.id === note.id ? note : n);
+          } else {
+            next = [note, ...prev];
+          }
+          persist(next);
+          return next;
+        });
+      },
+      onNoteDeleted: (noteId) => {
+        setNotes((prev) => {
+          const next = prev.filter(n => n.id !== noteId);
+          persist(next);
+          return next;
+        });
+      },
       onStatusChange: setSyncState,
     };
-    startSync(callbacks, s3);
+    startSync(cbs);
   }, []);
 
   const stopSyncEngine = useCallback(() => {
@@ -304,18 +318,7 @@ export function useNotes() {
   }, []);
 
   const triggerSync = useCallback(async () => {
-    if (!s3ConfigRef.current) return;
-    setSyncState(prev => ({ ...prev, status: 'syncing' }));
-    try {
-      await syncOnce(
-        () => notesRef.current,
-        (merged) => { persist(merged); setNotes(merged); },
-        s3ConfigRef.current,
-      );
-      setSyncState({ enabled: true, status: 'idle', lastSync: Date.now(), error: null });
-    } catch (e) {
-      setSyncState(prev => ({ ...prev, status: 'error', error: (e as Error).message }));
-    }
+    await syncTrigger();
   }, []);
 
   // Cleanup on unmount
@@ -334,6 +337,7 @@ export function useNotes() {
     setFbPost,
     clearFbPost,
     syncState,
+    setSyncState,
     initSync,
     stopSyncEngine,
     triggerSync,

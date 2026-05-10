@@ -465,7 +465,6 @@ export function SettingsPanel({
   if (settingsPage === 'sync') {
     return (
       <SyncPage
-        s3Complete={s3Complete}
         syncState={syncState}
         onTriggerSync={onTriggerSync}
         onSyncEnabled={onSyncEnabled}
@@ -664,14 +663,13 @@ export function SettingsPanel({
 // ── SyncPage ──────────────────────────────────────────────────────────────────
 
 interface SyncPageProps {
-  s3Complete: boolean
   syncState: SyncState
   onTriggerSync: () => void
   onSyncEnabled: () => void
   onSyncDisabled: () => void
 }
 
-function SyncPage({ s3Complete, syncState, onTriggerSync, onSyncEnabled, onSyncDisabled }: SyncPageProps) {
+function SyncPage({ syncState, onTriggerSync, onSyncEnabled, onSyncDisabled }: SyncPageProps) {
   const [enabled, setEnabled] = useState(isSyncEnabled())
   const [pwd, setPwd] = useState(getSyncPassword())
   const [saved, setSaved] = useState(false)
@@ -683,12 +681,11 @@ function SyncPage({ s3Complete, syncState, onTriggerSync, onSyncEnabled, onSyncD
       onSyncDisabled()
     } else {
       if (!pwd.trim()) return
-      if (!s3Complete) return
       enableSync(pwd)
       setEnabled(true)
       onSyncEnabled()
     }
-  }, [enabled, pwd, s3Complete, onSyncEnabled, onSyncDisabled])
+  }, [enabled, pwd, onSyncEnabled, onSyncDisabled])
 
   const handleSavePassword = useCallback(() => {
     if (!pwd.trim()) return
@@ -701,12 +698,15 @@ function SyncPage({ s3Complete, syncState, onTriggerSync, onSyncEnabled, onSyncD
 
   const statusLabel =
     syncState.status === 'syncing' ? 'Syncing…' :
+    syncState.status === 'connecting' ? 'Connecting…' :
+    syncState.status === 'offline' ? 'Offline' :
     syncState.status === 'error' ? 'Error' :
     syncState.status === 'idle' ? 'Connected' : 'Off'
 
   const statusClass =
-    syncState.status === 'syncing' ? 'sync-status--syncing' :
+    syncState.status === 'syncing' || syncState.status === 'connecting' ? 'sync-status--syncing' :
     syncState.status === 'error' ? 'sync-status--error' :
+    syncState.status === 'offline' ? 'sync-status--error' :
     syncState.status === 'idle' ? 'sync-status--ok' : ''
 
   const lastSyncStr = syncState.lastSync
@@ -716,14 +716,6 @@ function SyncPage({ s3Complete, syncState, onTriggerSync, onSyncEnabled, onSyncD
   return (
     <div className="settings-panel">
 
-      {!s3Complete && (
-        <div className="settings-section">
-          <p className="s3-status s3-status--error">
-            S3 credentials must be configured first. Go to S3 / Backup settings.
-          </p>
-        </div>
-      )}
-
       <div className="settings-section">
         <p className="settings-label">Sync</p>
         <div className="settings-toggle-row">
@@ -731,7 +723,7 @@ function SyncPage({ s3Complete, syncState, onTriggerSync, onSyncEnabled, onSyncD
           <button
             className={`settings-toggle${enabled ? ' settings-toggle--on' : ''}`}
             onClick={handleToggle}
-            disabled={!s3Complete || (!enabled && !pwd.trim())}
+            disabled={!enabled && !pwd.trim()}
             aria-label={enabled ? 'Disable sync' : 'Enable sync'}
             role="switch"
             aria-checked={enabled}
@@ -743,7 +735,10 @@ function SyncPage({ s3Complete, syncState, onTriggerSync, onSyncEnabled, onSyncD
           <div className="sync-status-row">
             <span className={`sync-status-dot ${statusClass}`} />
             <span>{statusLabel}</span>
-            {lastSyncStr && <span className="sync-last-time">Last sync: {lastSyncStr}</span>}
+            {syncState.deviceCount > 1 && (
+              <span className="sync-device-count">{syncState.deviceCount} devices</span>
+            )}
+            {lastSyncStr && <span className="sync-last-time">Last: {lastSyncStr}</span>}
           </div>
         )}
         {syncState.error && (
@@ -754,7 +749,7 @@ function SyncPage({ s3Complete, syncState, onTriggerSync, onSyncEnabled, onSyncD
       <div className="settings-section">
         <p className="settings-label">Encryption Password</p>
         <p className="settings-hint" style={{ marginBottom: 8, marginTop: 0 }}>
-          All notes are encrypted before upload. Use the same password on every device.
+          All notes are encrypted before syncing. Use the same password on every device to link them together.
         </p>
         <input
           type="password"
@@ -764,15 +759,14 @@ function SyncPage({ s3Complete, syncState, onTriggerSync, onSyncEnabled, onSyncD
           onChange={e => setPwd(e.target.value)}
           autoComplete="new-password"
           spellCheck={false}
-          disabled={!s3Complete}
         />
         <div className="settings-section--actions" style={{ marginTop: 10 }}>
           <button
             className="settings-save-btn"
             onClick={handleSavePassword}
-            disabled={!pwd.trim() || !s3Complete}
+            disabled={!pwd.trim()}
           >
-            {saved ? 'Saved \u2713' : 'Save & Enable'}
+            {saved ? 'Saved ✓' : 'Save & Enable'}
           </button>
         </div>
       </div>
@@ -782,7 +776,7 @@ function SyncPage({ s3Complete, syncState, onTriggerSync, onSyncEnabled, onSyncD
           <button
             className="s3-backup-now-btn"
             onClick={onTriggerSync}
-            disabled={syncState.status === 'syncing'}
+            disabled={syncState.status === 'syncing' || syncState.status === 'connecting'}
             style={{ width: '100%' }}
           >
             <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -812,8 +806,8 @@ function SyncPage({ s3Complete, syncState, onTriggerSync, onSyncEnabled, onSyncD
       )}
 
       <p className="settings-hint">
-        Sync uses your S3 bucket to exchange encrypted notes between devices.
-        No extra servers are involved — data goes directly from your browser to S3.
+        Sync connects your devices via a secure WebSocket channel. Notes are end-to-end encrypted
+        — the server only stores opaque blobs it cannot read. Credentials (FB, S3, etc.) never leave your device.
       </p>
     </div>
   )

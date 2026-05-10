@@ -1,26 +1,50 @@
-# ── Build stage ────────────────────────────────────────────────────────────
-FROM node:20-alpine AS build
+# ── Build frontend ─────────────────────────────────────────────────────────
+FROM node:20-alpine AS build-frontend
 
 WORKDIR /app
-
-# Install deps with a clean lockfile install for reproducible builds.
 COPY package*.json ./
 RUN npm ci
-
-# Bundle the app.
 COPY . .
 RUN npm run build
 
+# ── Build sync server ──────────────────────────────────────────────────────
+FROM node:20-alpine AS build-server
+
+WORKDIR /server
+COPY server/package*.json ./
+RUN npm ci
+COPY server/ .
+RUN npx tsc
+
 # ── Runtime stage ──────────────────────────────────────────────────────────
-FROM nginx:alpine AS runtime
+FROM node:20-alpine AS runtime
 
-# Drop the default site config in favor of our SPA-aware one.
-RUN rm /etc/nginx/conf.d/default.conf
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+# Install nginx
+RUN apk add --no-cache nginx
 
-# Static assets produced by Vite.
-COPY --from=build /app/dist /usr/share/nginx/html
+# nginx config
+RUN rm -f /etc/nginx/http.d/default.conf
+COPY nginx.conf /etc/nginx/http.d/default.conf
+
+# Static assets
+COPY --from=build-frontend /app/dist /usr/share/nginx/html
+
+# Sync server
+WORKDIR /server
+COPY --from=build-server /server/dist ./dist
+COPY --from=build-server /server/node_modules ./node_modules
+COPY --from=build-server /server/package.json ./
+
+# Data directory for SQLite (mount as volume for persistence)
+RUN mkdir -p /data/sync
+
+# Entrypoint script to start both nginx and the sync server
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
 EXPOSE 80
 
-CMD ["nginx", "-g", "daemon off;"]
+ENV SYNC_PORT=3001
+ENV SYNC_DATA_DIR=/data/sync
+
+CMD ["/entrypoint.sh"]

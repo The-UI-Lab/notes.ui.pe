@@ -143,17 +143,9 @@ export default function App() {
     requestPersistentStorage().catch(() => {})
   }, [])
 
-  // ── Initialize sync engine with S3 config ────────────────────────────────
+  // ── Initialize sync engine ─────────────────────────────────────────────────
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem('notes-s3-v1')
-      if (raw) {
-        const s3 = JSON.parse(raw)
-        if (s3.bucket && s3.region && s3.accessKeyId && s3.secretAccessKey) {
-          initSync(s3)
-        }
-      }
-    } catch { /* no S3 config yet */ }
+    initSync()
     return () => { stopSyncEngine() }
   }, [initSync, stopSyncEngine])
 
@@ -545,17 +537,7 @@ export default function App() {
             setSettingsPage={setSettingsPage}
             syncState={syncState}
             onTriggerSync={triggerSync}
-            onSyncEnabled={() => {
-              try {
-                const raw = localStorage.getItem('notes-s3-v1')
-                if (raw) {
-                  const s3 = JSON.parse(raw)
-                  if (s3.bucket && s3.region && s3.accessKeyId && s3.secretAccessKey) {
-                    initSync(s3)
-                  }
-                }
-              } catch { /* ignore */ }
-            }}
+            onSyncEnabled={initSync}
             onSyncDisabled={stopSyncEngine}
           />
         ) : sidebarView === 'facebook' && fbSettings ? (
