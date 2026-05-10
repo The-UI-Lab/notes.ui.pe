@@ -184,7 +184,7 @@ export function pageUrl(pageId: string): string {
 
 // ── Insights ─────────────────────────────────────────────────────────────────
 
-import type { FbPostInsight, FbPageInsightsSummary } from '../types'
+import type { FbPostInsight } from '../types'
 
 /** Metrics we ask the Graph API for on each post. */
 const POST_INSIGHT_METRICS = [
