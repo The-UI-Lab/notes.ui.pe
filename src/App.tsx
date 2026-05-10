@@ -23,7 +23,7 @@ import {
   getMediaBlob,
   requestPersistentStorage,
 } from './utils/media'
-import { initVault, lockVault, hasPin as checkHasPin } from './utils/vault'
+import { initVault, lockVault, hasPin as checkHasPin, secureGet } from './utils/vault'
 import './App.css'
 
 // ── Utilities ────────────────────────────────────────────────────────────────
@@ -138,12 +138,28 @@ export default function App() {
     localStorage.setItem(THEME_KEY, theme)
   }, [theme])
 
+  // ── Load FB settings from vault (async) ──────────────────────────────────
+  const reloadFbSettings = useCallback(async () => {
+    try {
+      const raw = await secureGet('notes-fb-v1')
+      if (!raw) { setFbSettings(loadFbSettings()); return }
+      const parsed = JSON.parse(raw) as Partial<FbSettings>
+      if (parsed.accessToken && parsed.pageId) {
+        setFbSettings({ accessToken: parsed.accessToken, pageId: parsed.pageId })
+      } else {
+        setFbSettings(null)
+      }
+    } catch {
+      setFbSettings(loadFbSettings())
+    }
+  }, [])
+
   // ── Re-read FB settings whenever we leave the settings panel ─────────────
   useEffect(() => {
     if (sidebarView !== 'settings') {
-      setFbSettings(loadFbSettings())
+      reloadFbSettings()
     }
-  }, [sidebarView, settingsPage])
+  }, [sidebarView, settingsPage, reloadFbSettings])
 
   // ── Vault + note loading on mount ────────────────────────────────────────
   useEffect(() => {
@@ -157,19 +173,22 @@ export default function App() {
       } else {
         await loadFromVault()
         if (cancelled) return
+        await reloadFbSettings()
+        if (cancelled) return
         setVaultReady(true)
         initSync()
       }
     })()
     requestPersistentStorage().catch(() => {})
     return () => { cancelled = true; stopSyncEngine() }
-  }, [loadFromVault, initSync, stopSyncEngine])
+  }, [loadFromVault, reloadFbSettings, initSync, stopSyncEngine])
 
   const handleVaultUnlocked = useCallback(async () => {
     setVaultLocked(false)
     await loadFromVault()
+    await reloadFbSettings()
     initSync()
-  }, [loadFromVault, initSync])
+  }, [loadFromVault, reloadFbSettings, initSync])
 
   const handleLockApp = useCallback(async () => {
     const pinSet = await checkHasPin()
