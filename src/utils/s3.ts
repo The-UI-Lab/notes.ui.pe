@@ -147,6 +147,51 @@ export async function uploadBackup(
   if (!res.ok) throw new Error(`S3 upload failed (${res.status}): ${await res.text()}`)
 }
 
+/** Checks whether an object exists and returns its Last-Modified date (or null). */
+export async function headObject(config: S3Config, key: string): Promise<string | null> {
+  const url     = s3Url(config, `/${key}`)
+  const headers = await buildAuthHeaders('HEAD', url, {}, null, config)
+  const res = await fetch(url.toString(), { method: 'HEAD', headers })
+  if (res.status === 404 || res.status === 403) return null
+  if (!res.ok) throw new Error(`S3 HEAD failed (${res.status})`)
+  return res.headers.get('last-modified')
+}
+
+/** Deletes an object from S3. Succeeds silently if the key doesn't exist. */
+export async function deleteObject(config: S3Config, key: string): Promise<void> {
+  const url     = s3Url(config, `/${key}`)
+  const headers = await buildAuthHeaders('DELETE', url, {}, null, config)
+  const res = await fetch(url.toString(), { method: 'DELETE', headers })
+  if (!res.ok && res.status !== 204 && res.status !== 404)
+    throw new Error(`S3 delete failed (${res.status}): ${await res.text()}`)
+}
+
+/** Lists all objects under a given prefix. */
+export async function listPrefix(config: S3Config, prefix: string): Promise<BackupItem[]> {
+  const url = s3Url(config, '/')
+  url.searchParams.set('list-type', '2')
+  url.searchParams.set('prefix', prefix)
+  const headers = await buildAuthHeaders('GET', url, {}, null, config)
+  const res = await fetch(url.toString(), { headers })
+  if (!res.ok) throw new Error(`S3 list failed (${res.status}): ${await res.text()}`)
+  const doc      = new DOMParser().parseFromString(await res.text(), 'application/xml')
+  const contents = doc.querySelectorAll('Contents')
+  return Array.from(contents).map(c => ({
+    key:          c.querySelector('Key')?.textContent ?? '',
+    lastModified: c.querySelector('LastModified')?.textContent ?? '',
+    size:         parseInt(c.querySelector('Size')?.textContent ?? '0', 10),
+  }))
+}
+
+/** Downloads a raw blob (ArrayBuffer). */
+export async function downloadObject(config: S3Config, key: string): Promise<ArrayBuffer> {
+  const url     = s3Url(config, `/${key}`)
+  const headers = await buildAuthHeaders('GET', url, {}, null, config)
+  const res = await fetch(url.toString(), { headers })
+  if (!res.ok) throw new Error(`S3 download failed (${res.status}): ${await res.text()}`)
+  return res.arrayBuffer()
+}
+
 /** Downloads an encrypted backup blob. */
 export async function downloadBackup(config: S3Config, key: string): Promise<ArrayBuffer> {
   const url     = s3Url(config, `/${key}`)

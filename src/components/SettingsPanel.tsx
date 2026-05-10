@@ -19,6 +19,13 @@ import {
   type MediaRecord,
   type StorageInfo,
 } from '../utils/media'
+import {
+  isSyncEnabled,
+  enableSync,
+  disableSync,
+  getSyncPassword,
+  type SyncState,
+} from '../utils/sync'
 
 // ── Export helper ──────────────────────────────────────────────────────────
 
@@ -105,8 +112,12 @@ interface Props {
   setTheme: (t: Theme) => void
   notes: Note[]
   onRestoreNotes: (notes: Note[]) => void
-  settingsPage: 'home' | 'facebook' | 's3'
-  setSettingsPage: (p: 'home' | 'facebook' | 's3') => void
+  settingsPage: 'home' | 'facebook' | 's3' | 'sync'
+  setSettingsPage: (p: 'home' | 'facebook' | 's3' | 'sync') => void
+  syncState: SyncState
+  onTriggerSync: () => void
+  onSyncEnabled: () => void
+  onSyncDisabled: () => void
 }
 
 // ── Main component ─────────────────────────────────────────────────────────
@@ -118,6 +129,10 @@ export function SettingsPanel({
   onRestoreNotes,
   settingsPage,
   setSettingsPage,
+  syncState,
+  onTriggerSync,
+  onSyncEnabled,
+  onSyncDisabled,
 }: Props) {
   // ── Facebook state ─────────────────────────────────────────────────────
   const [fb,      setFb]      = useState<FbSettings>(() => loadJson(FB_KEY, FB_FALLBACK))
@@ -330,6 +345,25 @@ export function SettingsPanel({
             </span>
             <span className="settings-nav-arrow"><ChevronRight /></span>
           </button>
+
+          <button
+            className="settings-nav-item"
+            onClick={() => setSettingsPage('sync')}
+          >
+            <span className="settings-nav-icon" aria-hidden="true">
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+                <path d="M1.5 8a6.5 6.5 0 0 1 11.48-4.16" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+                <path d="M14.5 8a6.5 6.5 0 0 1-11.48 4.16" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+                <path d="M13 1v3h-3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+                <path d="M3 15v-3h3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+            </span>
+            <span className="settings-nav-label">
+              Multi-device Sync
+              {syncState.enabled && <span className="settings-nav-badge">On</span>}
+            </span>
+            <span className="settings-nav-arrow"><ChevronRight /></span>
+          </button>
         </div>
 
         <div className="settings-stats">
@@ -424,6 +458,19 @@ export function SettingsPanel({
           The access token and page ID are stored in your browser's local storage. They never leave your device.
         </p>
       </div>
+    )
+  }
+
+  // ── Page: Sync ────────────────────────────────────────────────────────
+  if (settingsPage === 'sync') {
+    return (
+      <SyncPage
+        s3Complete={s3Complete}
+        syncState={syncState}
+        onTriggerSync={onTriggerSync}
+        onSyncEnabled={onSyncEnabled}
+        onSyncDisabled={onSyncDisabled}
+      />
     )
   }
 
@@ -610,6 +657,164 @@ export function SettingsPanel({
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+// ── SyncPage ──────────────────────────────────────────────────────────────────
+
+interface SyncPageProps {
+  s3Complete: boolean
+  syncState: SyncState
+  onTriggerSync: () => void
+  onSyncEnabled: () => void
+  onSyncDisabled: () => void
+}
+
+function SyncPage({ s3Complete, syncState, onTriggerSync, onSyncEnabled, onSyncDisabled }: SyncPageProps) {
+  const [enabled, setEnabled] = useState(isSyncEnabled())
+  const [pwd, setPwd] = useState(getSyncPassword())
+  const [saved, setSaved] = useState(false)
+
+  const handleToggle = useCallback(() => {
+    if (enabled) {
+      disableSync()
+      setEnabled(false)
+      onSyncDisabled()
+    } else {
+      if (!pwd.trim()) return
+      if (!s3Complete) return
+      enableSync(pwd)
+      setEnabled(true)
+      onSyncEnabled()
+    }
+  }, [enabled, pwd, s3Complete, onSyncEnabled, onSyncDisabled])
+
+  const handleSavePassword = useCallback(() => {
+    if (!pwd.trim()) return
+    enableSync(pwd)
+    setEnabled(true)
+    setSaved(true)
+    onSyncEnabled()
+    setTimeout(() => setSaved(false), 2000)
+  }, [pwd, onSyncEnabled])
+
+  const statusLabel =
+    syncState.status === 'syncing' ? 'Syncing…' :
+    syncState.status === 'error' ? 'Error' :
+    syncState.status === 'idle' ? 'Connected' : 'Off'
+
+  const statusClass =
+    syncState.status === 'syncing' ? 'sync-status--syncing' :
+    syncState.status === 'error' ? 'sync-status--error' :
+    syncState.status === 'idle' ? 'sync-status--ok' : ''
+
+  const lastSyncStr = syncState.lastSync
+    ? new Date(syncState.lastSync).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+    : null
+
+  return (
+    <div className="settings-panel">
+
+      {!s3Complete && (
+        <div className="settings-section">
+          <p className="s3-status s3-status--error">
+            S3 credentials must be configured first. Go to S3 / Backup settings.
+          </p>
+        </div>
+      )}
+
+      <div className="settings-section">
+        <p className="settings-label">Sync</p>
+        <div className="settings-toggle-row">
+          <span>Multi-device sync</span>
+          <button
+            className={`settings-toggle${enabled ? ' settings-toggle--on' : ''}`}
+            onClick={handleToggle}
+            disabled={!s3Complete || (!enabled && !pwd.trim())}
+            aria-label={enabled ? 'Disable sync' : 'Enable sync'}
+            role="switch"
+            aria-checked={enabled}
+          >
+            <span className="settings-toggle-knob" />
+          </button>
+        </div>
+        {enabled && (
+          <div className="sync-status-row">
+            <span className={`sync-status-dot ${statusClass}`} />
+            <span>{statusLabel}</span>
+            {lastSyncStr && <span className="sync-last-time">Last sync: {lastSyncStr}</span>}
+          </div>
+        )}
+        {syncState.error && (
+          <p className="s3-status s3-status--error">{syncState.error}</p>
+        )}
+      </div>
+
+      <div className="settings-section">
+        <p className="settings-label">Encryption Password</p>
+        <p className="settings-hint" style={{ marginBottom: 8, marginTop: 0 }}>
+          All notes are encrypted before upload. Use the same password on every device.
+        </p>
+        <input
+          type="password"
+          className="settings-form-input"
+          placeholder="Sync encryption password"
+          value={pwd}
+          onChange={e => setPwd(e.target.value)}
+          autoComplete="new-password"
+          spellCheck={false}
+          disabled={!s3Complete}
+        />
+        <div className="settings-section--actions" style={{ marginTop: 10 }}>
+          <button
+            className="settings-save-btn"
+            onClick={handleSavePassword}
+            disabled={!pwd.trim() || !s3Complete}
+          >
+            {saved ? 'Saved \u2713' : 'Save & Enable'}
+          </button>
+        </div>
+      </div>
+
+      {enabled && (
+        <div className="settings-section">
+          <button
+            className="s3-backup-now-btn"
+            onClick={onTriggerSync}
+            disabled={syncState.status === 'syncing'}
+            style={{ width: '100%' }}
+          >
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M1.5 8a6.5 6.5 0 0 1 11.48-4.16" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+              <path d="M14.5 8a6.5 6.5 0 0 1-11.48 4.16" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+              <path d="M13 1v3h-3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+              <path d="M3 15v-3h3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+            {syncState.status === 'syncing' ? 'Syncing…' : 'Sync Now'}
+          </button>
+        </div>
+      )}
+
+      {enabled && (
+        <div className="settings-section">
+          <button
+            className="settings-danger-btn"
+            onClick={() => {
+              disableSync()
+              setEnabled(false)
+              onSyncDisabled()
+            }}
+          >
+            Disable Sync
+          </button>
+        </div>
+      )}
+
+      <p className="settings-hint">
+        Sync uses your S3 bucket to exchange encrypted notes between devices.
+        No extra servers are involved — data goes directly from your browser to S3.
+      </p>
     </div>
   )
 }

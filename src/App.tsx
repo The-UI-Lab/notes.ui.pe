@@ -93,13 +93,14 @@ export default function App() {
     notes, createNote, updateNote, deleteNote,
     addMedia, removeMedia, restoreNotes,
     setFbPost, clearFbPost,
+    syncState, initSync, stopSyncEngine, triggerSync, schedulePush,
   } = useNotes()
   const sortedNotes = [...notes].sort((a, b) => b.updatedAt - a.updatedAt)
 
   const [selectedId,    setSelectedId]    = useState<string | null>(() => sortedNotes[0]?.id ?? null)
   const [mobileView,    setMobileView]    = useState<'list' | 'editor'>('list')
   const [sidebarView,   setSidebarView]   = useState<'notes' | 'settings' | 'facebook' | 'fb-insights'>('notes')
-  const [settingsPage,  setSettingsPage]  = useState<'home' | 'facebook' | 's3'>('home')
+  const [settingsPage,  setSettingsPage]  = useState<'home' | 'facebook' | 's3' | 'sync'>('home')
   const [fbSettings,    setFbSettings]    = useState<FbSettings | null>(loadFbSettings)
   const [fbBusy,        setFbBusy]        = useState(false)
   const [fbError,       setFbError]       = useState<string | null>(null)
@@ -141,6 +142,29 @@ export default function App() {
   useEffect(() => {
     requestPersistentStorage().catch(() => {})
   }, [])
+
+  // ── Initialize sync engine with S3 config ────────────────────────────────
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem('notes-s3-v1')
+      if (raw) {
+        const s3 = JSON.parse(raw)
+        if (s3.bucket && s3.region && s3.accessKeyId && s3.secretAccessKey) {
+          initSync(s3)
+        }
+      }
+    } catch { /* no S3 config yet */ }
+    return () => { stopSyncEngine() }
+  }, [initSync, stopSyncEngine])
+
+  // ── Sync on tab focus (pull changes from other devices) ─────────────────
+  useEffect(() => {
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') triggerSync()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => document.removeEventListener('visibilitychange', onVisible)
+  }, [triggerSync])
 
   // ── Scroll to top on note switch ──────────────────────────────────────────
   useEffect(() => {
@@ -219,9 +243,12 @@ export default function App() {
         setShowSaved(true)
         setStreak(bumpStreak())
         setTimeout(() => setShowSaved(false), 2200)
+        // Schedule sync push after save
+        const note = notes.find(n => n.id === id)
+        if (note) schedulePush({ ...note, body, updatedAt: Date.now() })
       }, 700)
     },
-    [updateNote]
+    [updateNote, notes, schedulePush]
   )
 
   const handleDelete = useCallback(
@@ -454,6 +481,7 @@ export default function App() {
               <span className="sidebar-brand-name">
                 {settingsPage === 'facebook' ? 'FB Page Connector'
                   : settingsPage === 's3' ? 'S3 / Backup'
+                  : settingsPage === 'sync' ? 'Multi-device Sync'
                   : 'Settings'}
               </span>
             </>
@@ -515,6 +543,20 @@ export default function App() {
             onRestoreNotes={restoreNotes}
             settingsPage={settingsPage}
             setSettingsPage={setSettingsPage}
+            syncState={syncState}
+            onTriggerSync={triggerSync}
+            onSyncEnabled={() => {
+              try {
+                const raw = localStorage.getItem('notes-s3-v1')
+                if (raw) {
+                  const s3 = JSON.parse(raw)
+                  if (s3.bucket && s3.region && s3.accessKeyId && s3.secretAccessKey) {
+                    initSync(s3)
+                  }
+                }
+              } catch { /* ignore */ }
+            }}
+            onSyncDisabled={stopSyncEngine}
           />
         ) : sidebarView === 'facebook' && fbSettings ? (
           <FacebookFeed

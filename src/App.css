@@ -2013,3 +2013,91 @@
   background: var(--item-hover);
   color: var(--text);
 }
+
+/* ── Sync settings ─────────────────────────────────────────────────────────── */
+
+.settings-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 0;
+}
+
+.settings-toggle {
+  position: relative;
+  width: 44px;
+  height: 26px;
+  border-radius: 13px;
+  border: none;
+  background: var(--border);
+  cursor: pointer;
+  transition: background 0.2s ease;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.settings-toggle--on {
+  background: var(--accent);
+}
+
+.settings-toggle:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.settings-toggle-knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.18);
+  transition: transform 0.2s ease;
+}
+
+.settings-toggle--on .settings-toggle-knob {
+  transform: translateX(18px);
+}
+
+.sync-status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.sync-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--border);
+  flex-shrink: 0;
+}
+
+.sync-status-dot.sync-status--ok {
+  background: #34c759;
+}
+
+.sync-status-dot.sync-status--syncing {
+  background: #ff9500;
+  animation: sync-pulse 1.2s ease-in-out infinite;
+}
+
+.sync-status-dot.sync-status--error {
+  background: #ff3b30;
+}
+
+@keyframes sync-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.sync-last-time {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-faint);
+}
