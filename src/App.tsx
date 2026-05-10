@@ -6,6 +6,7 @@ import { FacebookFeed } from './components/FacebookFeed'
 import { FacebookInsights } from './components/FacebookInsights'
 import { MediaThumb, useMediaUrl } from './components/MediaThumb'
 import { InstallPrompt } from './components/InstallPrompt'
+import { LockScreen } from './components/LockScreen'
 import {
   loadFbSettings,
   publishNoteToPage,
@@ -22,6 +23,7 @@ import {
   getMediaBlob,
   requestPersistentStorage,
 } from './utils/media'
+import { initVault, lockVault, hasPin as checkHasPin } from './utils/vault'
 import './App.css'
 
 // ── Utilities ────────────────────────────────────────────────────────────────
@@ -94,13 +96,18 @@ export default function App() {
     addMedia, removeMedia, restoreNotes,
     setFbPost, clearFbPost,
     syncState, initSync, stopSyncEngine, triggerSync, schedulePush,
+    loadFromVault,
   } = useNotes()
   const sortedNotes = [...notes].sort((a, b) => b.updatedAt - a.updatedAt)
+
+  // ── Vault state ───────────────────────────────────────────────────────────
+  const [vaultReady, setVaultReady] = useState(false)
+  const [vaultLocked, setVaultLocked] = useState(false)
 
   const [selectedId,    setSelectedId]    = useState<string | null>(() => sortedNotes[0]?.id ?? null)
   const [mobileView,    setMobileView]    = useState<'list' | 'editor'>('list')
   const [sidebarView,   setSidebarView]   = useState<'notes' | 'settings' | 'facebook' | 'fb-insights'>('notes')
-  const [settingsPage,  setSettingsPage]  = useState<'home' | 'facebook' | 's3' | 'sync'>('home')
+  const [settingsPage,  setSettingsPage]  = useState<'home' | 'facebook' | 's3' | 'sync' | 'security'>('home')
   const [fbSettings,    setFbSettings]    = useState<FbSettings | null>(loadFbSettings)
   const [fbBusy,        setFbBusy]        = useState(false)
   const [fbError,       setFbError]       = useState<string | null>(null)
@@ -138,16 +145,39 @@ export default function App() {
     }
   }, [sidebarView, settingsPage])
 
-  // ── Ask for persistent storage on mount (best-effort) ────────────────────
+  // ── Vault + note loading on mount ────────────────────────────────────────
   useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      const result = await initVault()
+      if (cancelled) return
+      if (result === 'locked') {
+        setVaultLocked(true)
+        setVaultReady(true)
+      } else {
+        await loadFromVault()
+        if (cancelled) return
+        setVaultReady(true)
+        initSync()
+      }
+    })()
     requestPersistentStorage().catch(() => {})
-  }, [])
+    return () => { cancelled = true; stopSyncEngine() }
+  }, [loadFromVault, initSync, stopSyncEngine])
 
-  // ── Initialize sync engine ─────────────────────────────────────────────────
-  useEffect(() => {
+  const handleVaultUnlocked = useCallback(async () => {
+    setVaultLocked(false)
+    await loadFromVault()
     initSync()
-    return () => { stopSyncEngine() }
-  }, [initSync, stopSyncEngine])
+  }, [loadFromVault, initSync])
+
+  const handleLockApp = useCallback(async () => {
+    const pinSet = await checkHasPin()
+    if (pinSet) {
+      lockVault()
+      setVaultLocked(true)
+    }
+  }, [])
 
   // ── Sync on tab focus (pull changes from other devices) ─────────────────
   useEffect(() => {
@@ -445,6 +475,23 @@ export default function App() {
   }
 
   // ── Render ────────────────────────────────────────────────────────────────
+
+  // Vault loading
+  if (!vaultReady) {
+    return (
+      <div className="lock-screen">
+        <div className="lock-screen-card">
+          <div className="lock-screen-icon lock-screen-icon--loading" />
+        </div>
+      </div>
+    )
+  }
+
+  // PIN lock screen
+  if (vaultLocked) {
+    return <LockScreen onUnlocked={handleVaultUnlocked} />
+  }
+
   return (
     <>
     <div className={`app${mobileView === 'editor' ? ' app--editor-view' : ''}`}>
@@ -474,6 +521,7 @@ export default function App() {
                 {settingsPage === 'facebook' ? 'FB Page Connector'
                   : settingsPage === 's3' ? 'S3 / Backup'
                   : settingsPage === 'sync' ? 'Multi-device Sync'
+                  : settingsPage === 'security' ? 'Screen Lock'
                   : 'Settings'}
               </span>
             </>
@@ -539,6 +587,7 @@ export default function App() {
             onTriggerSync={triggerSync}
             onSyncEnabled={initSync}
             onSyncDisabled={stopSyncEngine}
+            onLockApp={handleLockApp}
           />
         ) : sidebarView === 'facebook' && fbSettings ? (
           <FacebookFeed

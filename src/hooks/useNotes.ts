@@ -17,6 +17,7 @@ import {
   type SyncState,
   type SyncCallbacks,
 } from '../utils/sync';
+import { secureGet, secureSet } from '../utils/vault';
 
 const STORAGE_KEY   = 'notes-app-v1';
 const MIGRATION_KEY = 'notes-media-migrated-v1';
@@ -33,46 +34,51 @@ interface RawNote {
   fbPost?: unknown;
 }
 
-function load(): Note[] {
+function parseNotes(raw: string): Note[] {
+  const parsed = JSON.parse(raw) as RawNote[];
+  return parsed.map((n) => {
+    let body: string;
+    if (typeof n.body === 'string') {
+      body = n.body;
+    } else {
+      const title   = typeof n.title   === 'string' ? n.title   : '';
+      const content = typeof n.content === 'string' ? n.content : '';
+      body = title ? (content ? `${title}\n\n${content}` : title) : content;
+    }
+    const media = Array.isArray(n.media)
+      ? (n.media as unknown[]).filter((m): m is MediaRef =>
+          !!m && typeof m === 'object' &&
+          typeof (m as MediaRef).id   === 'string' &&
+          typeof (m as MediaRef).type === 'string')
+      : [];
+    const fbPost =
+      n.fbPost && typeof n.fbPost === 'object'
+        ? (n.fbPost as FbPostInfo)
+        : undefined;
+    return {
+      id:        String(n.id ?? crypto.randomUUID()),
+      body,
+      media,
+      createdAt: Number(n.createdAt ?? Date.now()),
+      updatedAt: Number(n.updatedAt ?? Date.now()),
+      ...(fbPost ? { fbPost } : {}),
+    };
+  });
+}
+
+async function loadNotes(): Promise<Note[]> {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = await secureGet(STORAGE_KEY);
     if (!raw) return [];
-    const parsed = JSON.parse(raw) as RawNote[];
-    return parsed.map((n) => {
-      let body: string;
-      if (typeof n.body === 'string') {
-        body = n.body;
-      } else {
-        const title   = typeof n.title   === 'string' ? n.title   : '';
-        const content = typeof n.content === 'string' ? n.content : '';
-        body = title ? (content ? `${title}\n\n${content}` : title) : content;
-      }
-      const media = Array.isArray(n.media)
-        ? (n.media as unknown[]).filter((m): m is MediaRef =>
-            !!m && typeof m === 'object' &&
-            typeof (m as MediaRef).id   === 'string' &&
-            typeof (m as MediaRef).type === 'string')
-        : [];
-      const fbPost =
-        n.fbPost && typeof n.fbPost === 'object'
-          ? (n.fbPost as FbPostInfo)
-          : undefined;
-      return {
-        id:        String(n.id ?? crypto.randomUUID()),
-        body,
-        media,
-        createdAt: Number(n.createdAt ?? Date.now()),
-        updatedAt: Number(n.updatedAt ?? Date.now()),
-        ...(fbPost ? { fbPost } : {}),
-      };
-    });
+    return parseNotes(raw);
   } catch {
     return [];
   }
 }
 
 function persist(notes: Note[]): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(notes));
+  // Fire-and-forget async encryption + write
+  secureSet(STORAGE_KEY, JSON.stringify(notes)).catch(() => {});
 }
 
 /**
@@ -152,7 +158,8 @@ async function migrateLegacyImages(): Promise<Note[] | null> {
 }
 
 export function useNotes() {
-  const [notes, setNotes] = useState<Note[]>(load);
+  const [notes, setNotes] = useState<Note[]>([]);
+  const [notesLoaded, setNotesLoaded] = useState(false);
   const [syncState, setSyncState] = useState<SyncState>({
     enabled: isSyncEnabled(),
     status: isSyncEnabled() ? 'idle' : 'disabled',
@@ -173,12 +180,19 @@ export function useNotes() {
     }, 1500);
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    migrateLegacyImages()
-      .then((migrated) => { if (!cancelled && migrated) setNotes(migrated); })
-      .catch(() => {});
-    return () => { cancelled = true; };
+  // Load notes from encrypted storage once vault is unlocked
+  const loadFromVault = useCallback(async () => {
+    const loaded = await loadNotes();
+    setNotes(loaded);
+    setNotesLoaded(true);
+    // Run legacy migration after load
+    try {
+      const migrated = await migrateLegacyImages();
+      if (migrated) {
+        persist(migrated);
+        setNotes(migrated);
+      }
+    } catch { /* migration is best-effort */ }
   }, []);
 
   const createNote = useCallback((): Note => {
@@ -338,6 +352,8 @@ export function useNotes() {
     clearFbPost,
     syncState,
     setSyncState,
+    notesLoaded,
+    loadFromVault,
     initSync,
     stopSyncEngine,
     triggerSync,

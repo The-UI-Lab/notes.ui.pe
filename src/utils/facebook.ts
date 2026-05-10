@@ -32,6 +32,8 @@ export function loadFbSettings(): FbSettings | null {
   try {
     const raw = localStorage.getItem(FB_KEY)
     if (!raw) return null
+    // Skip encrypted vault data — will be loaded async
+    if (raw.startsWith('v1:')) return null
     const parsed = JSON.parse(raw) as Partial<FbSettings>
     if (!parsed.accessToken || !parsed.pageId) return null
     return { accessToken: parsed.accessToken, pageId: parsed.pageId }

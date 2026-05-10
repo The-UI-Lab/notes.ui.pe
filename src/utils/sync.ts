@@ -26,6 +26,7 @@ import {
   type MediaRecord,
 } from './media'
 import type { Note } from '../types'
+import { secureGet, secureSet } from './vault'
 
 // ── Config / persistence keys ──────────────────────────────────────────────
 
@@ -491,13 +492,26 @@ export function isSyncEnabled(): boolean {
   return localStorage.getItem(SYNC_ENABLED_KEY) === '1'
 }
 
+// Password is cached in memory after vault decrypts it at startup
+let cachedPassword: string | null = null
+
 export function getSyncPassword(): string {
+  if (cachedPassword !== null) return cachedPassword
+  // Fallback: read raw (may be encrypted, but works pre-vault-migration)
   return localStorage.getItem(SYNC_PASSWORD_KEY) ?? ''
+}
+
+export async function loadSyncPassword(): Promise<string> {
+  const val = await secureGet(SYNC_PASSWORD_KEY)
+  cachedPassword = val ?? ''
+  return cachedPassword
 }
 
 export function enableSync(password: string): void {
   localStorage.setItem(SYNC_ENABLED_KEY, '1')
-  localStorage.setItem(SYNC_PASSWORD_KEY, password)
+  cachedPassword = password
+  // Encrypt and persist via vault
+  secureSet(SYNC_PASSWORD_KEY, password).catch(() => {})
 }
 
 export function disableSync(): void {
@@ -506,6 +520,7 @@ export function disableSync(): void {
   localStorage.removeItem(SYNC_PUSHED_KEY)
   localStorage.removeItem(SYNC_QUEUE_KEY)
   localStorage.removeItem(SYNC_LAST_KEY)
+  cachedPassword = null
   stopSync()
 }
 
@@ -521,7 +536,8 @@ export function startSync(cbs: SyncCallbacks): void {
   if (!isSyncEnabled()) return
   callbacks = cbs
   updateState({ enabled: true, status: 'connecting' })
-  connect().catch(() => {})
+  // Load decrypted password from vault, then connect
+  loadSyncPassword().then(() => connect()).catch(() => {})
 }
 
 export function stopSync(): void {

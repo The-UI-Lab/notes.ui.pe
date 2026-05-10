@@ -26,6 +26,13 @@ import {
   getSyncPassword,
   type SyncState,
 } from '../utils/sync'
+import {
+  hasPin as checkHasPin,
+  setPin as vaultSetPin,
+  removePin as vaultRemovePin,
+  secureGet,
+  secureSet,
+} from '../utils/vault'
 
 // ── Export helper ──────────────────────────────────────────────────────────
 
@@ -83,13 +90,28 @@ interface BackupPayload {
 const FB_KEY = 'notes-fb-v1'
 const S3_KEY = 'notes-s3-v1'
 
-function loadJson<T>(key: string, fallback: T): T {
+function loadJsonSync<T>(key: string, fallback: T): T {
   try {
     const raw = localStorage.getItem(key)
+    // If encrypted (vault prefix), return fallback — will be loaded async
+    if (raw && raw.startsWith('v1:')) return fallback
     return raw ? (JSON.parse(raw) as T) : fallback
   } catch {
     return fallback
   }
+}
+
+async function loadJsonAsync<T>(key: string, fallback: T): Promise<T> {
+  try {
+    const raw = await secureGet(key)
+    return raw ? (JSON.parse(raw) as T) : fallback
+  } catch {
+    return fallback
+  }
+}
+
+async function saveJsonAsync(key: string, value: unknown): Promise<void> {
+  await secureSet(key, JSON.stringify(value))
 }
 
 const FB_FALLBACK: FbSettings  = { accessToken: '', pageId: '' }
@@ -112,12 +134,13 @@ interface Props {
   setTheme: (t: Theme) => void
   notes: Note[]
   onRestoreNotes: (notes: Note[]) => void
-  settingsPage: 'home' | 'facebook' | 's3' | 'sync'
-  setSettingsPage: (p: 'home' | 'facebook' | 's3' | 'sync') => void
+  settingsPage: 'home' | 'facebook' | 's3' | 'sync' | 'security'
+  setSettingsPage: (p: 'home' | 'facebook' | 's3' | 'sync' | 'security') => void
   syncState: SyncState
   onTriggerSync: () => void
   onSyncEnabled: () => void
   onSyncDisabled: () => void
+  onLockApp: () => void
 }
 
 // ── Main component ─────────────────────────────────────────────────────────
@@ -133,15 +156,31 @@ export function SettingsPanel({
   onTriggerSync,
   onSyncEnabled,
   onSyncDisabled,
+  onLockApp,
 }: Props) {
-  // ── Facebook state ─────────────────────────────────────────────────────
-  const [fb,      setFb]      = useState<FbSettings>(() => loadJson(FB_KEY, FB_FALLBACK))
+  // ── Facebook state ───────────────────────────────────────────
+  const [fb,      setFb]      = useState<FbSettings>(() => loadJsonSync(FB_KEY, FB_FALLBACK))
   const [fbDraft, setFbDraft] = useState<FbSettings>(fb)
 
-  // ── S3 state ───────────────────────────────────────────────────────────
-  const [s3,      setS3]      = useState<S3Config>(() => loadJson(S3_KEY, S3_FALLBACK))
+  // ── S3 state ───────────────────────────────────────────────
+  const [s3,      setS3]      = useState<S3Config>(() => loadJsonSync(S3_KEY, S3_FALLBACK))
   const [s3Draft, setS3Draft] = useState<S3Config>(s3)
   const [s3Saved, setS3Saved] = useState(false)
+
+  // Load encrypted credentials from vault on mount
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      const [fbLoaded, s3Loaded] = await Promise.all([
+        loadJsonAsync<FbSettings>(FB_KEY, FB_FALLBACK),
+        loadJsonAsync<S3Config>(S3_KEY, S3_FALLBACK),
+      ])
+      if (cancelled) return
+      setFb(fbLoaded); setFbDraft(fbLoaded)
+      setS3(s3Loaded); setS3Draft(s3Loaded)
+    })()
+    return () => { cancelled = true }
+  }, [])
 
   // ── Backup list state ──────────────────────────────────────────────────
   const [backups,       setBackups]       = useState<BackupItem[]>([])
@@ -193,12 +232,12 @@ export function SettingsPanel({
   // ── Handlers ───────────────────────────────────────────────────────────
 
   const saveFb = useCallback(() => {
-    localStorage.setItem(FB_KEY, JSON.stringify(fbDraft))
+    saveJsonAsync(FB_KEY, fbDraft).catch(() => {})
     setFb(fbDraft)
   }, [fbDraft])
 
   const saveS3 = useCallback(() => {
-    localStorage.setItem(S3_KEY, JSON.stringify(s3Draft))
+    saveJsonAsync(S3_KEY, s3Draft).catch(() => {})
     setS3(s3Draft)
     setS3Saved(true)
     setBackupsLoaded(false)
@@ -364,6 +403,20 @@ export function SettingsPanel({
             </span>
             <span className="settings-nav-arrow"><ChevronRight /></span>
           </button>
+
+          <button
+            className="settings-nav-item"
+            onClick={() => setSettingsPage('security')}
+          >
+            <span className="settings-nav-icon" aria-hidden="true">
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
+                <rect x="3" y="7" width="10" height="7" rx="1.5" stroke="currentColor" strokeWidth="1.3"/>
+                <path d="M5 7V5a3 3 0 0 1 6 0v2" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+              </svg>
+            </span>
+            <span className="settings-nav-label">Screen Lock</span>
+            <span className="settings-nav-arrow"><ChevronRight /></span>
+          </button>
         </div>
 
         <div className="settings-stats">
@@ -471,6 +524,11 @@ export function SettingsPanel({
         onSyncDisabled={onSyncDisabled}
       />
     )
+  }
+
+  // ── Page: Security / Screen Lock ────────────────────────────────────
+  if (settingsPage === 'security') {
+    return <SecurityPage onLockApp={onLockApp} />
   }
 
   // ── Page: S3 / Backup ──────────────────────────────────────────────────
@@ -809,6 +867,146 @@ function SyncPage({ syncState, onTriggerSync, onSyncEnabled, onSyncDisabled }: S
         Sync connects your devices via a secure WebSocket channel. Notes are end-to-end encrypted
         — the server only stores opaque blobs it cannot read. Credentials (FB, S3, etc.) never leave your device.
       </p>
+    </div>
+  )
+}
+
+// ── SecurityPage ─────────────────────────────────────────────────────────────
+
+interface SecurityPageProps {
+  onLockApp: () => void
+}
+
+function SecurityPage({ onLockApp }: SecurityPageProps) {
+  const [hasPinState, setHasPinState] = useState(false)
+  const [pin, setPin] = useState('')
+  const [confirmPin, setConfirmPin] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [success, setSuccess] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    checkHasPin().then(setHasPinState)
+  }, [])
+
+  const handleSetPin = useCallback(async () => {
+    setError(null)
+    if (!pin.trim()) { setError('PIN cannot be empty'); return }
+    if (pin.length < 4) { setError('PIN must be at least 4 characters'); return }
+    if (pin !== confirmPin) { setError('PINs do not match'); return }
+    setBusy(true)
+    try {
+      await vaultSetPin(pin)
+      setHasPinState(true)
+      setPin('')
+      setConfirmPin('')
+      setSuccess('Screen lock enabled')
+      setTimeout(() => setSuccess(null), 2000)
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }, [pin, confirmPin])
+
+  const handleRemovePin = useCallback(async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      await vaultRemovePin()
+      setHasPinState(false)
+      setSuccess('Screen lock removed')
+      setTimeout(() => setSuccess(null), 2000)
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }, [])
+
+  return (
+    <div className="settings-panel">
+
+      <div className="settings-section">
+        <p className="settings-label">Screen Lock</p>
+        <p className="settings-hint" style={{ marginTop: 0, marginBottom: 12 }}>
+          {hasPinState
+            ? 'Your notes are protected with a PIN. You\'ll need to enter it when opening the app.'
+            : 'Set a PIN to protect your notes when someone else uses your device. This is optional — your data is always encrypted at rest regardless.'}
+        </p>
+
+        {hasPinState ? (
+          <>
+            <div className="sync-status-row" style={{ marginBottom: 12 }}>
+              <span className="sync-status-dot sync-status--ok" />
+              <span>Screen lock active</span>
+            </div>
+            <button className="s3-backup-now-btn" onClick={onLockApp} style={{ width: '100%', marginBottom: 8 }}>
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <rect x="3" y="7" width="10" height="7" rx="1.5" stroke="currentColor" strokeWidth="1.3"/>
+                <path d="M5 7V5a3 3 0 0 1 6 0v2" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+              </svg>
+              Lock Now
+            </button>
+            <button
+              className="settings-danger-btn"
+              onClick={handleRemovePin}
+              disabled={busy}
+            >
+              {busy ? 'Removing…' : 'Remove Screen Lock'}
+            </button>
+          </>
+        ) : (
+          <>
+            <input
+              type="password"
+              inputMode="numeric"
+              className="settings-form-input"
+              placeholder="New PIN (min 4 characters)"
+              value={pin}
+              onChange={e => setPin(e.target.value)}
+              autoComplete="new-password"
+              maxLength={32}
+              style={{ marginBottom: 8 }}
+            />
+            <input
+              type="password"
+              inputMode="numeric"
+              className="settings-form-input"
+              placeholder="Confirm PIN"
+              value={confirmPin}
+              onChange={e => setConfirmPin(e.target.value)}
+              autoComplete="new-password"
+              maxLength={32}
+            />
+            <div className="settings-section--actions" style={{ marginTop: 10 }}>
+              <button
+                className="settings-save-btn"
+                onClick={handleSetPin}
+                disabled={busy || !pin.trim()}
+              >
+                {busy ? 'Setting…' : 'Enable Screen Lock'}
+              </button>
+            </div>
+          </>
+        )}
+
+        {error && <p className="s3-status s3-status--error" style={{ marginTop: 8 }}>{error}</p>}
+        {success && <p className="s3-status s3-status--ok" style={{ marginTop: 8 }}>{success}</p>}
+      </div>
+
+      <div className="settings-section">
+        <p className="settings-label">About Security</p>
+        <p className="settings-hint" style={{ marginTop: 0 }}>
+          All your data is encrypted at rest using a device-bound key stored in your browser's
+          secure storage. Even without a PIN, your notes are never stored as plain text.
+        </p>
+        <p className="settings-hint" style={{ marginTop: 4 }}>
+          The optional PIN adds a second layer — it protects against someone opening this app
+          on your device. If you lose your PIN, you can clear browser data and re-sync from
+          another device.
+        </p>
+      </div>
     </div>
   )
 }
