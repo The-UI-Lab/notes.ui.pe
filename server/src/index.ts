@@ -318,7 +318,7 @@ const httpServer = createServer(async (req, res) => {
 
       const syncCode = normalizeSyncCode(rawCode)
       if (syncCode.length !== SYNC_CODE_LENGTH) {
-        jsonResponse(res, 400, { error: 'Invalid sync code format' })
+        jsonResponse(res, 400, { error: 'Invalid sync code.' })
         return
       }
 
