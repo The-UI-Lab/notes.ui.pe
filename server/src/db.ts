@@ -54,6 +54,22 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_deleted_at ON deleted(room_id, deleted_at);
 `)
 
+// ── Migration: backfill sync_codes from existing rooms ──────────────────────
+// Existing deployments have room_ids in notes/media/deleted but no sync_codes
+// entry. Register them so legacy password-based users can still connect.
+const migrateExistingRooms = db.prepare(`
+  INSERT OR IGNORE INTO sync_codes (room_id)
+  SELECT DISTINCT room_id FROM notes
+  UNION
+  SELECT DISTINCT room_id FROM media
+  UNION
+  SELECT DISTINCT room_id FROM deleted
+`)
+const migrated = migrateExistingRooms.run()
+if (migrated.changes > 0) {
+  console.log(`[db] Migrated ${migrated.changes} existing room(s) into sync_codes table`)
+}
+
 // ── Note operations ──────────────────────────────────────────────────────────
 
 const stmtUpsertNote = db.prepare(`
