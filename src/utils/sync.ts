@@ -115,12 +115,6 @@ function setPushedMap(m: Record<string, number>): void {
   localStorage.setItem(SYNC_PUSHED_KEY, JSON.stringify(m))
 }
 
-async function deriveRoomId(syncCode: string): Promise<string> {
-  const data = new TextEncoder().encode(syncCode)
-  const hash = await crypto.subtle.digest('SHA-256', data)
-  return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('')
-}
-
 function normalizeSyncCode(input: string): string {
   return input.replace(/[-\s]/g, '')
 }
