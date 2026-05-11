@@ -2,18 +2,23 @@
  * Multi-device sync via WebSocket — real-time, E2E encrypted.
  *
  * Architecture:
- *   - Client encrypts notes with AES-256-GCM using the user's sync password.
+ *   - Server generates a unique 48-char base62 sync code per user (~143 bits
+ *     of entropy). The sync code is used to:
+ *       1. Derive the AES-256 encryption key (client-side, via PBKDF2)
+ *       2. Derive the room ID (SHA-256 hash) for server-side grouping
+ *   - Client encrypts notes with AES-256-GCM using the sync code.
  *   - Encrypted blobs are sent to the sync server over WebSocket.
  *   - Server adds a second encryption layer and stores in SQLite.
  *   - Real-time: when one device pushes, all others in the same room get
  *     the update instantly via WebSocket broadcast.
  *   - Offline: edits are queued locally and pushed on reconnect.
- *   - Room ID = SHA-256(password) — devices with the same password auto-group.
  *   - Credentials (FB, S3, etc.) NEVER leave the device.
+ *   - Rate limiting on the server protects against brute-force / DDoS.
  *
- * The sync password serves dual purpose:
- *   1. Derive AES-256 encryption key (client-side, via PBKDF2)
- *   2. Derive room ID (SHA-256 hash) for server grouping
+ * Flow:
+ *   New user → POST /api/sync-code/generate → receives sync code + token
+ *   Existing user → POST /api/sync-code/validate → verifies code + gets token
+ *   Both → WebSocket join with { roomId, token }
  */
 
 import { encryptBackup, decryptBackup } from './crypto'
@@ -30,11 +35,16 @@ import { secureGet, secureSet } from './vault'
 
 // ── Config / persistence keys ──────────────────────────────────────────────
 
-const SYNC_ENABLED_KEY  = 'notes-sync-enabled'
-const SYNC_PASSWORD_KEY = 'notes-sync-password'
-const SYNC_PUSHED_KEY   = 'notes-sync-pushed'      // { [noteId]: updatedAt }
-const SYNC_QUEUE_KEY    = 'notes-sync-queue'        // offline queue
-const SYNC_LAST_KEY     = 'notes-sync-last'         // last sync timestamp
+const SYNC_ENABLED_KEY   = 'notes-sync-enabled'
+const SYNC_CODE_KEY      = 'notes-sync-code'        // the sync code (encrypted in vault)
+const SYNC_ROOM_KEY      = 'notes-sync-room'        // cached room ID
+const SYNC_TOKEN_KEY     = 'notes-sync-token'       // short-lived join token
+const SYNC_PUSHED_KEY    = 'notes-sync-pushed'      // { [noteId]: updatedAt }
+const SYNC_QUEUE_KEY     = 'notes-sync-queue'       // offline queue
+const SYNC_LAST_KEY      = 'notes-sync-last'        // last sync timestamp
+
+// Legacy key — used for migration from password-based sync
+const SYNC_PASSWORD_KEY  = 'notes-sync-password'
 
 // ── Public types ───────────────────────────────────────────────────────────
 
@@ -105,10 +115,14 @@ function setPushedMap(m: Record<string, number>): void {
   localStorage.setItem(SYNC_PUSHED_KEY, JSON.stringify(m))
 }
 
-async function deriveRoomId(password: string): Promise<string> {
-  const data = new TextEncoder().encode(password)
+async function deriveRoomId(syncCode: string): Promise<string> {
+  const data = new TextEncoder().encode(syncCode)
   const hash = await crypto.subtle.digest('SHA-256', data)
   return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+function normalizeSyncCode(input: string): string {
+  return input.replace(/[-\s]/g, '')
 }
 
 // ── Encrypted note envelope ────────────────────────────────────────────────
@@ -118,7 +132,7 @@ interface NoteEnvelope {
   media: { id: string; mime: string; data: string }[]  // base64 media inlined
 }
 
-async function encryptNote(note: Note, password: string): Promise<ArrayBuffer> {
+async function encryptNote(note: Note, syncCode: string): Promise<ArrayBuffer> {
   // Inline small media (< 512 KB) for atomic sync
   const inlinedMedia: NoteEnvelope['media'] = []
   for (const ref of note.media) {
@@ -129,11 +143,11 @@ async function encryptNote(note: Note, password: string): Promise<ArrayBuffer> {
     }
   }
   const envelope: NoteEnvelope = { note, media: inlinedMedia }
-  return encryptBackup(password, JSON.stringify(envelope))
+  return encryptBackup(syncCode, JSON.stringify(envelope))
 }
 
-async function decryptNoteEnvelope(data: ArrayBuffer, password: string): Promise<NoteEnvelope> {
-  const json = await decryptBackup(password, data)
+async function decryptNoteEnvelope(data: ArrayBuffer, syncCode: string): Promise<NoteEnvelope> {
+  const json = await decryptBackup(syncCode, data)
   return JSON.parse(json) as NoteEnvelope
 }
 
@@ -203,15 +217,67 @@ function getWsUrl(): string {
   return `${proto}//${loc.host}/ws`
 }
 
+async function getJoinToken(): Promise<{ roomId: string; token: string } | null> {
+  const syncCode = getSyncCode()
+  if (!syncCode) return null
+
+  // Check if we have a cached token (they're short-lived, but try anyway)
+  const cachedToken = localStorage.getItem(SYNC_TOKEN_KEY)
+  const cachedRoom = localStorage.getItem(SYNC_ROOM_KEY)
+  if (cachedToken && cachedRoom) {
+    // Try using cached token first; if it fails, the server will reject and we'll re-validate
+    return { roomId: cachedRoom, token: cachedToken }
+  }
+
+  // Validate the sync code with the server to get a fresh token
+  try {
+    const resp = await fetch(getApiUrl('/api/sync-code/validate'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ syncCode: normalizeSyncCode(syncCode) }),
+    })
+
+    if (resp.status === 429) {
+      const data = await resp.json() as { error: string; retryAfter?: number }
+      throw new Error(data.error || 'Rate limited')
+    }
+
+    if (!resp.ok) {
+      throw new Error('Invalid sync code')
+    }
+
+    const data = await resp.json() as { roomId: string; token: string }
+    localStorage.setItem(SYNC_TOKEN_KEY, data.token)
+    localStorage.setItem(SYNC_ROOM_KEY, data.roomId)
+    return data
+  } catch (e) {
+    console.warn('[sync] Failed to validate sync code:', e)
+    return null
+  }
+}
+
+async function refreshJoinToken(): Promise<{ roomId: string; token: string } | null> {
+  // Force re-validation by clearing cached token
+  localStorage.removeItem(SYNC_TOKEN_KEY)
+  return getJoinToken()
+}
+
 async function connect(): Promise<void> {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return
 
-  const password = getSyncPassword()
-  if (!password) return
-
-  const roomId = await deriveRoomId(password)
+  const syncCode = getSyncCode()
+  if (!syncCode) return
 
   updateState({ status: 'connecting', error: null })
+
+  const joinInfo = await getJoinToken()
+  if (!joinInfo) {
+    updateState({ status: 'error', error: 'Failed to authenticate sync code' })
+    scheduleReconnect()
+    return
+  }
+
+  const { roomId, token } = joinInfo
 
   try {
     ws = new WebSocket(getWsUrl())
@@ -222,7 +288,7 @@ async function connect(): Promise<void> {
   }
 
   ws.onopen = () => {
-    ws!.send(JSON.stringify({ type: 'join', roomId }))
+    ws!.send(JSON.stringify({ type: 'join', roomId, token }))
   }
 
   ws.onmessage = async (event) => {
@@ -257,8 +323,8 @@ function scheduleReconnect(): void {
 }
 
 async function handleServerMessage(msg: Record<string, unknown>): Promise<void> {
-  const password = getSyncPassword()
-  if (!password) return
+  const syncCode = getSyncCode()
+  if (!syncCode) return
 
   switch (msg.type) {
     case 'welcome': {
@@ -288,7 +354,7 @@ async function handleServerMessage(msg: Record<string, unknown>): Promise<void> 
         if (deletedIds.has(rn.noteId)) continue
         try {
           const buf = base64ToArrayBuffer(rn.data)
-          const envelope = await decryptNoteEnvelope(buf, password)
+          const envelope = await decryptNoteEnvelope(buf, syncCode)
           await restoreEnvelopeMedia(envelope)
 
           // Request large media from server
@@ -331,7 +397,7 @@ async function handleServerMessage(msg: Record<string, unknown>): Promise<void> 
       const updatedAt = msg.updatedAt as number
       try {
         const buf = base64ToArrayBuffer(data)
-        const envelope = await decryptNoteEnvelope(buf, password)
+        const envelope = await decryptNoteEnvelope(buf, syncCode)
         await restoreEnvelopeMedia(envelope)
 
         // Request large media
@@ -397,7 +463,17 @@ async function handleServerMessage(msg: Record<string, unknown>): Promise<void> 
     }
 
     case 'error': {
-      console.warn('[sync] Server error:', msg.message)
+      const errMsg = msg.message as string
+      console.warn('[sync] Server error:', errMsg)
+
+      // If token expired or invalid, refresh and reconnect
+      if (errMsg?.includes('expired') || errMsg?.includes('Invalid or expired token')) {
+        console.log('[sync] Token expired, refreshing…')
+        const newJoin = await refreshJoinToken()
+        if (newJoin && ws?.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'join', roomId: newJoin.roomId, token: newJoin.token }))
+        }
+      }
       break
     }
   }
@@ -412,10 +488,10 @@ function requestMedia(mediaId: string): void {
 // ── Push operations ───────────────────────────────────────────────────────
 
 async function pushNote(note: Note): Promise<void> {
-  const password = getSyncPassword()
-  if (!password) return
+  const syncCode = getSyncCode()
+  if (!syncCode) return
 
-  const buf = await encryptNote(note, password)
+  const buf = await encryptNote(note, syncCode)
   const b64 = arrayBufferToBase64(buf)
 
   if (ws?.readyState === WebSocket.OPEN) {
@@ -457,8 +533,8 @@ async function pushAllNotes(): Promise<void> {
 
 async function flushQueue(): Promise<void> {
   if (!callbacks || ws?.readyState !== WebSocket.OPEN) return
-  const password = getSyncPassword()
-  if (!password) return
+  const syncCode = getSyncCode()
+  if (!syncCode) return
 
   const queue = getQueue()
   if (!queue.length) return
@@ -492,35 +568,97 @@ export function isSyncEnabled(): boolean {
   return localStorage.getItem(SYNC_ENABLED_KEY) === '1'
 }
 
-// Password is cached in memory after vault decrypts it at startup
-let cachedPassword: string | null = null
+// ── API helpers ────────────────────────────────────────────────────────────
 
-export function getSyncPassword(): string {
-  if (cachedPassword !== null) return cachedPassword
+function getApiUrl(path: string): string {
+  return `${window.location.origin}${path}`
+}
+
+/** Generate a new sync code from the server. */
+export async function generateSyncCode(): Promise<{ syncCode: string; roomId: string; token: string }> {
+  const resp = await fetch(getApiUrl('/api/sync-code/generate'), { method: 'POST' })
+  if (resp.status === 429) {
+    const data = await resp.json() as { error: string; retryAfter?: number }
+    throw new Error(data.error || 'Rate limited. Please try again later.')
+  }
+  if (!resp.ok) throw new Error('Failed to generate sync code')
+  return resp.json() as Promise<{ syncCode: string; roomId: string; token: string }>
+}
+
+/** Validate an existing sync code with the server. */
+export async function validateSyncCode(syncCode: string): Promise<{ roomId: string; token: string }> {
+  const normalized = normalizeSyncCode(syncCode)
+  const resp = await fetch(getApiUrl('/api/sync-code/validate'), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ syncCode: normalized }),
+  })
+  if (resp.status === 429) {
+    const data = await resp.json() as { error: string; retryAfter?: number }
+    throw new Error(data.error || 'Too many attempts. Please try again later.')
+  }
+  if (resp.status === 401) {
+    throw new Error('Invalid sync code. Please check and try again.')
+  }
+  if (!resp.ok) throw new Error('Failed to validate sync code')
+  return resp.json() as Promise<{ roomId: string; token: string }>
+}
+
+// Sync code is cached in memory after vault decrypts it at startup
+let cachedSyncCode: string | null = null
+
+export function getSyncCode(): string {
+  if (cachedSyncCode !== null) return cachedSyncCode
   // Fallback: read raw (may be encrypted, but works pre-vault-migration)
-  return localStorage.getItem(SYNC_PASSWORD_KEY) ?? ''
+  // Also check legacy password key for migration
+  return localStorage.getItem(SYNC_CODE_KEY)
+    ?? localStorage.getItem(SYNC_PASSWORD_KEY)
+    ?? ''
+}
+
+export async function loadSyncCode(): Promise<string> {
+  // Try new key first, then legacy password key for migration
+  let val = await secureGet(SYNC_CODE_KEY)
+  if (!val) {
+    val = await secureGet(SYNC_PASSWORD_KEY)
+    if (val) {
+      // Migrate from legacy password to sync code key
+      await secureSet(SYNC_CODE_KEY, val)
+    }
+  }
+  cachedSyncCode = val ?? ''
+  return cachedSyncCode
+}
+
+// Legacy export for backward compatibility during migration
+export function getSyncPassword(): string {
+  return getSyncCode()
 }
 
 export async function loadSyncPassword(): Promise<string> {
-  const val = await secureGet(SYNC_PASSWORD_KEY)
-  cachedPassword = val ?? ''
-  return cachedPassword
+  return loadSyncCode()
 }
 
-export function enableSync(password: string): void {
+export function enableSync(syncCode: string, roomId?: string, token?: string): void {
   localStorage.setItem(SYNC_ENABLED_KEY, '1')
-  cachedPassword = password
+  cachedSyncCode = normalizeSyncCode(syncCode)
   // Encrypt and persist via vault
-  secureSet(SYNC_PASSWORD_KEY, password).catch(() => {})
+  secureSet(SYNC_CODE_KEY, cachedSyncCode).catch(() => {})
+  // Cache room ID and token for faster reconnects
+  if (roomId) localStorage.setItem(SYNC_ROOM_KEY, roomId)
+  if (token) localStorage.setItem(SYNC_TOKEN_KEY, token)
 }
 
 export function disableSync(): void {
   localStorage.removeItem(SYNC_ENABLED_KEY)
-  localStorage.removeItem(SYNC_PASSWORD_KEY)
+  localStorage.removeItem(SYNC_CODE_KEY)
+  localStorage.removeItem(SYNC_PASSWORD_KEY) // cleanup legacy
+  localStorage.removeItem(SYNC_ROOM_KEY)
+  localStorage.removeItem(SYNC_TOKEN_KEY)
   localStorage.removeItem(SYNC_PUSHED_KEY)
   localStorage.removeItem(SYNC_QUEUE_KEY)
   localStorage.removeItem(SYNC_LAST_KEY)
-  cachedPassword = null
+  cachedSyncCode = null
   stopSync()
 }
 
@@ -536,8 +674,8 @@ export function startSync(cbs: SyncCallbacks): void {
   if (!isSyncEnabled()) return
   callbacks = cbs
   updateState({ enabled: true, status: 'connecting' })
-  // Load decrypted password from vault, then connect
-  loadSyncPassword().then(() => connect()).catch(() => {})
+  // Load decrypted sync code from vault, then connect
+  loadSyncCode().then(() => connect()).catch(() => {})
 }
 
 export function stopSync(): void {

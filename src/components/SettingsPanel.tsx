@@ -23,7 +23,9 @@ import {
   isSyncEnabled,
   enableSync,
   disableSync,
-  getSyncPassword,
+  getSyncCode,
+  generateSyncCode,
+  validateSyncCode,
   type SyncState,
 } from '../utils/sync'
 import {
@@ -729,30 +731,66 @@ interface SyncPageProps {
 
 function SyncPage({ syncState, onTriggerSync, onSyncEnabled, onSyncDisabled }: SyncPageProps) {
   const [enabled, setEnabled] = useState(isSyncEnabled())
-  const [pwd, setPwd] = useState(getSyncPassword())
-  const [saved, setSaved] = useState(false)
+  const [mode, setMode] = useState<'choose' | 'new' | 'existing' | null>(null)
+  const [syncCodeInput, setSyncCodeInput] = useState('')
+  const [generatedCode, setGeneratedCode] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
-  const handleToggle = useCallback(() => {
-    if (enabled) {
-      disableSync()
-      setEnabled(false)
-      onSyncDisabled()
-    } else {
-      if (!pwd.trim()) return
-      enableSync(pwd)
+  // Show the current sync code (masked) if enabled
+  const currentCode = getSyncCode()
+
+  const handleGenerate = useCallback(async () => {
+    setBusy(true)
+    setError(null)
+    try {
+      const result = await generateSyncCode()
+      setGeneratedCode(result.syncCode)
+      enableSync(result.syncCode, result.roomId, result.token)
       setEnabled(true)
       onSyncEnabled()
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBusy(false)
     }
-  }, [enabled, pwd, onSyncEnabled, onSyncDisabled])
+  }, [onSyncEnabled])
 
-  const handleSavePassword = useCallback(() => {
-    if (!pwd.trim()) return
-    enableSync(pwd)
-    setEnabled(true)
-    setSaved(true)
-    onSyncEnabled()
-    setTimeout(() => setSaved(false), 2000)
-  }, [pwd, onSyncEnabled])
+  const handleValidate = useCallback(async () => {
+    if (!syncCodeInput.trim()) { setError('Please enter a sync code.'); return }
+    setBusy(true)
+    setError(null)
+    try {
+      const result = await validateSyncCode(syncCodeInput)
+      enableSync(syncCodeInput, result.roomId, result.token)
+      setEnabled(true)
+      setMode(null)
+      setSyncCodeInput('')
+      onSyncEnabled()
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }, [syncCodeInput, onSyncEnabled])
+
+  const handleCopy = useCallback(() => {
+    if (!generatedCode) return
+    navigator.clipboard.writeText(generatedCode).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    }).catch(() => {})
+  }, [generatedCode])
+
+  const handleDisable = useCallback(() => {
+    disableSync()
+    setEnabled(false)
+    setMode(null)
+    setGeneratedCode(null)
+    setSyncCodeInput('')
+    onSyncDisabled()
+  }, [onSyncDisabled])
 
   const statusLabel =
     syncState.status === 'syncing' ? 'Syncing…' :
@@ -771,25 +809,18 @@ function SyncPage({ syncState, onTriggerSync, onSyncEnabled, onSyncDisabled }: S
     ? new Date(syncState.lastSync).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
     : null
 
+  // Mask sync code for display: show first 6 chars, mask the rest
+  const maskedCode = currentCode
+    ? currentCode.slice(0, 6) + '•'.repeat(Math.max(0, currentCode.length - 6))
+    : ''
+
   return (
     <div className="settings-panel">
 
-      <div className="settings-section">
-        <p className="settings-label">Sync</p>
-        <div className="settings-toggle-row">
-          <span>Multi-device sync</span>
-          <button
-            className={`settings-toggle${enabled ? ' settings-toggle--on' : ''}`}
-            onClick={handleToggle}
-            disabled={!enabled && !pwd.trim()}
-            aria-label={enabled ? 'Disable sync' : 'Enable sync'}
-            role="switch"
-            aria-checked={enabled}
-          >
-            <span className="settings-toggle-knob" />
-          </button>
-        </div>
-        {enabled && (
+      {/* ── Status section (when enabled) ─────────────────── */}
+      {enabled && (
+        <div className="settings-section">
+          <p className="settings-label">Sync Status</p>
           <div className="sync-status-row">
             <span className={`sync-status-dot ${statusClass}`} />
             <span>{statusLabel}</span>
@@ -798,38 +829,170 @@ function SyncPage({ syncState, onTriggerSync, onSyncEnabled, onSyncDisabled }: S
             )}
             {lastSyncStr && <span className="sync-last-time">Last: {lastSyncStr}</span>}
           </div>
-        )}
-        {syncState.error && (
-          <p className="s3-status s3-status--error">{syncState.error}</p>
-        )}
-      </div>
+          {syncState.error && (
+            <p className="s3-status s3-status--error">{syncState.error}</p>
+          )}
+        </div>
+      )}
 
-      <div className="settings-section">
-        <p className="settings-label">Encryption Password</p>
-        <p className="settings-hint" style={{ marginBottom: 8, marginTop: 0 }}>
-          All notes are encrypted before syncing. Use the same password on every device to link them together.
-        </p>
-        <input
-          type="password"
-          className="settings-form-input"
-          placeholder="Sync encryption password"
-          value={pwd}
-          onChange={e => setPwd(e.target.value)}
-          autoComplete="new-password"
-          spellCheck={false}
-        />
-        <div className="settings-section--actions" style={{ marginTop: 10 }}>
+      {/* ── Generated code display (after generating) ─────── */}
+      {generatedCode && (
+        <div className="settings-section">
+          <p className="settings-label">Your Sync Code</p>
+          <p className="settings-hint" style={{ marginTop: 0, marginBottom: 10, color: 'var(--error, #e74c3c)' }}>
+            ⚠️ Save this code now! You'll need it to link other devices. It cannot be recovered.
+          </p>
+          <div
+            className="sync-code-display"
+            style={{
+              fontFamily: 'monospace',
+              fontSize: '13px',
+              background: 'var(--bg-secondary, #f5f5f5)',
+              border: '1px solid var(--border, #ddd)',
+              borderRadius: '8px',
+              padding: '12px 14px',
+              wordBreak: 'break-all',
+              lineHeight: 1.6,
+              userSelect: 'all',
+              letterSpacing: '0.5px',
+            }}
+          >
+            {generatedCode}
+          </div>
+          <button
+            className="s3-backup-now-btn"
+            onClick={handleCopy}
+            style={{ width: '100%', marginTop: 10 }}
+          >
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <rect x="5" y="5" width="9" height="9" rx="1.5" stroke="currentColor" strokeWidth="1.3"/>
+              <path d="M11 5V3.5A1.5 1.5 0 0 0 9.5 2h-6A1.5 1.5 0 0 0 2 3.5v6A1.5 1.5 0 0 0 3.5 11H5" stroke="currentColor" strokeWidth="1.3"/>
+            </svg>
+            {copied ? 'Copied ✓' : 'Copy to Clipboard'}
+          </button>
           <button
             className="settings-save-btn"
-            onClick={handleSavePassword}
-            disabled={!pwd.trim()}
+            onClick={() => setGeneratedCode(null)}
+            style={{ width: '100%', marginTop: 8 }}
           >
-            {saved ? 'Saved ✓' : 'Save & Enable'}
+            Done
           </button>
         </div>
-      </div>
+      )}
 
-      {enabled && (
+      {/* ── Sync code info (when enabled, after dismissing generated code) ── */}
+      {enabled && !generatedCode && (
+        <div className="settings-section">
+          <p className="settings-label">Sync Code</p>
+          <p className="settings-hint" style={{ marginTop: 0, marginBottom: 6 }}>
+            Your notes are encrypted with your unique sync code. Use it on another device to link them.
+          </p>
+          <div
+            style={{
+              fontFamily: 'monospace',
+              fontSize: '12px',
+              color: 'var(--text-secondary, #888)',
+              letterSpacing: '1px',
+            }}
+          >
+            {maskedCode}
+          </div>
+        </div>
+      )}
+
+      {/* ── Setup flow (when not enabled) ─────────────────── */}
+      {!enabled && !generatedCode && (
+        <div className="settings-section">
+          <p className="settings-label">Set Up Multi-Device Sync</p>
+          <p className="settings-hint" style={{ marginTop: 0, marginBottom: 12 }}>
+            Sync uses a unique code to link your devices. Your notes are end-to-end encrypted — the server cannot read them.
+          </p>
+
+          {!mode && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <button className="settings-save-btn" onClick={() => setMode('new')} style={{ width: '100%' }}>
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true" style={{ marginRight: 6, verticalAlign: '-2px' }}>
+                  <circle cx="8" cy="8" r="6.5" stroke="currentColor" strokeWidth="1.3"/>
+                  <path d="M8 5v6M5 8h6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+                </svg>
+                Get a New Sync Code
+              </button>
+              <button className="s3-backup-now-btn" onClick={() => setMode('existing')} style={{ width: '100%' }}>
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true" style={{ marginRight: 6, verticalAlign: '-2px' }}>
+                  <path d="M2 12l4.5-4.5L11 12" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+                  <path d="M9.5 9l2.5-2.5L14 8.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+                I Have a Sync Code
+              </button>
+            </div>
+          )}
+
+          {mode === 'new' && (
+            <div>
+              <p className="settings-hint" style={{ marginTop: 0, marginBottom: 10 }}>
+                A unique code will be generated for you. You'll need to copy it to your other devices.
+              </p>
+              <button
+                className="settings-save-btn"
+                onClick={handleGenerate}
+                disabled={busy}
+                style={{ width: '100%' }}
+              >
+                {busy ? 'Generating…' : 'Generate Sync Code'}
+              </button>
+              <button
+                className="modal-cancel-btn"
+                onClick={() => { setMode(null); setError(null) }}
+                disabled={busy}
+                style={{ width: '100%', marginTop: 8 }}
+              >
+                Back
+              </button>
+            </div>
+          )}
+
+          {mode === 'existing' && (
+            <div>
+              <p className="settings-hint" style={{ marginTop: 0, marginBottom: 10 }}>
+                Enter the sync code from your other device. You can include or omit the dashes.
+              </p>
+              <input
+                type="text"
+                className="settings-form-input"
+                placeholder="XXXXXX-XXXXXX-XXXXXX-XXXXXX-XXXXXX-XXXXXX-XXXXXX-XXXXXX"
+                value={syncCodeInput}
+                onChange={e => { setSyncCodeInput(e.target.value); setError(null) }}
+                autoComplete="off"
+                spellCheck={false}
+                style={{ fontFamily: 'monospace', fontSize: '12px', letterSpacing: '0.5px' }}
+              />
+              <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                <button
+                  className="modal-cancel-btn"
+                  onClick={() => { setMode(null); setSyncCodeInput(''); setError(null) }}
+                  disabled={busy}
+                  style={{ flex: 1 }}
+                >
+                  Back
+                </button>
+                <button
+                  className="settings-save-btn"
+                  onClick={handleValidate}
+                  disabled={busy || !syncCodeInput.trim()}
+                  style={{ flex: 1 }}
+                >
+                  {busy ? 'Validating…' : 'Link Device'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {error && <p className="s3-status s3-status--error" style={{ marginTop: 8 }}>{error}</p>}
+        </div>
+      )}
+
+      {/* ── Sync Now button ───────────────────────────────── */}
+      {enabled && !generatedCode && (
         <div className="settings-section">
           <button
             className="s3-backup-now-btn"
@@ -848,24 +1011,20 @@ function SyncPage({ syncState, onTriggerSync, onSyncEnabled, onSyncDisabled }: S
         </div>
       )}
 
-      {enabled && (
+      {/* ── Disable Sync ──────────────────────────────────── */}
+      {enabled && !generatedCode && (
         <div className="settings-section">
-          <button
-            className="settings-danger-btn"
-            onClick={() => {
-              disableSync()
-              setEnabled(false)
-              onSyncDisabled()
-            }}
-          >
+          <button className="settings-danger-btn" onClick={handleDisable}>
             Disable Sync
           </button>
         </div>
       )}
 
       <p className="settings-hint">
-        Sync connects your devices via a secure WebSocket channel. Notes are end-to-end encrypted
-        — the server only stores opaque blobs it cannot read. Credentials (FB, S3, etc.) never leave your device.
+        Sync connects your devices via a secure WebSocket channel. Your notes are end-to-end encrypted
+        with a unique code that only you possess — the server only stores opaque blobs it cannot read.
+        The sync code has 143 bits of entropy, making brute-force attacks computationally infeasible.
+        Credentials (FB, S3, etc.) never leave your device.
       </p>
     </div>
   )

@@ -45,6 +45,11 @@ db.exec(`
     PRIMARY KEY (room_id, note_id)
   );
 
+  CREATE TABLE IF NOT EXISTS sync_codes (
+    room_id     TEXT PRIMARY KEY,
+    created_at  INTEGER NOT NULL DEFAULT (unixepoch() * 1000)
+  );
+
   CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(room_id, updated_at);
   CREATE INDEX IF NOT EXISTS idx_deleted_at ON deleted(room_id, deleted_at);
 `)
@@ -167,4 +172,22 @@ export function getMediaBlob(roomId: string, mediaId: string): Buffer | null {
 
 export function hasMedia(roomId: string, mediaId: string): boolean {
   return !!stmtHasMedia.get(roomId, mediaId)
+}
+
+// ── Sync code operations ─────────────────────────────────────────────────────
+
+const stmtRegisterSyncCode = db.prepare(`
+  INSERT OR IGNORE INTO sync_codes (room_id) VALUES (?)
+`)
+
+const stmtSyncCodeExists = db.prepare(`
+  SELECT 1 FROM sync_codes WHERE room_id = ?
+`)
+
+export function registerSyncCode(roomId: string): void {
+  stmtRegisterSyncCode.run(roomId)
+}
+
+export function syncCodeExists(roomId: string): boolean {
+  return !!stmtSyncCodeExists.get(roomId)
 }
