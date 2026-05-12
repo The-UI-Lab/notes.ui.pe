@@ -1,5 +1,8 @@
 /**
- * Sync server — WebSocket + HTTP endpoints.
+ * Ephemeral Relay Sync Server — WebSocket + HTTP endpoints.
+ *
+ * Architecture: The server stores NOTHING permanently. It is a mailbox, not a vault.
+ * Data exists on the server only as long as the slowest device hasn't synced.
  *
  * Security model:
  *   - Each user gets a unique, server-generated sync code (48-char base62,
@@ -9,48 +12,63 @@
  *   - Sync codes are generated via POST /api/sync-code/generate.
  *   - Clients validate a sync code via POST /api/sync-code/validate before joining.
  *   - Rate limiting protects against brute-force and DDoS attacks.
+ *   - New devices must receive notes from an existing device (peer transfer with approval).
  *
  * WebSocket protocol (JSON messages):
  *   Client → Server:
- *     { type: 'join',       roomId, token }
- *     { type: 'push-note',  noteId, data (base64), updatedAt }
- *     { type: 'delete-note', noteId, deletedAt }
- *     { type: 'push-media', mediaId, data (base64) }
- *     { type: 'pull',       since }
- *     { type: 'pull-media', mediaId }
+ *     { type: 'join',             roomId, token, deviceId, deviceName }
+ *     { type: 'push-op',         payload (base64) }
+ *     { type: 'ack',             cursor }
+ *     { type: 'request-transfer' }
+ *     { type: 'approve-transfer', transferId }
+ *     { type: 'deny-transfer',   transferId }
+ *     { type: 'transfer-chunk',  transferId, chunk (base64), chunkIndex, totalChunks, resumeToken }
+ *     { type: 'transfer-resume', transferId, resumeToken }
+ *     { type: 'transfer-complete', transferId }
  *
  *   Server → Client:
- *     { type: 'welcome',    deviceCount }
- *     { type: 'sync',       notes: [...], deletions: [...] }
- *     { type: 'note-update', noteId, data (base64), updatedAt }
- *     { type: 'note-deleted', noteId, deletedAt }
- *     { type: 'media-data', mediaId, data (base64) }
- *     { type: 'device-joined' }
- *     { type: 'device-left' }
- *     { type: 'error',      message }
+ *     { type: 'welcome',          deviceCount, cursor, devices, needsTransfer }
+ *     { type: 'ops',              entries: [{ seq, payload (base64), deviceId, createdAt }] }
+ *     { type: 'op-broadcast',     seq, payload (base64), deviceId }
+ *     { type: 'transfer-requested', transferId, requesterId, requesterName }
+ *     { type: 'transfer-approved', transferId, approverId }
+ *     { type: 'transfer-denied',  transferId }
+ *     { type: 'transfer-chunk',   transferId, chunk (base64), chunkIndex, totalChunks, resumeToken }
+ *     { type: 'transfer-complete', transferId }
+ *     { type: 'device-joined',    deviceId, deviceName }
+ *     { type: 'device-left',      deviceId }
+ *     { type: 'error',            message }
  *
- * All `data` fields contain client-encrypted blobs (base64-encoded).
- * The server adds a second encryption layer before storing in SQLite.
+ * All `payload` fields contain client-encrypted blobs (base64-encoded).
+ * The server NEVER decrypts or inspects payloads — it just relays them.
  */
 
 import { createServer, type IncomingMessage } from 'node:http'
 import { randomBytes, createHash, createHmac } from 'node:crypto'
 import { WebSocketServer, WebSocket } from 'ws'
 import {
-  upsertNote,
-  getNotesSince,
-  getAllNotes,
-  deleteNote,
-  getDeletionsSince,
-  getAllDeletions,
-  putMediaBlob,
-  getMediaBlob,
-  hasMedia,
   registerSyncCode,
   syncCodeExists,
+  registerDevice,
+  getDevice,
+  getDevices,
+  updateDeviceCursor,
+  touchDevice,
+  appendOp,
+  getOpsSince,
+  getMaxSeq,
+  truncateDeliveredOps,
+  createTransfer,
+  getPendingTransfers,
+  getTransfer,
+  approveTransfer,
+  updateTransferStatus,
+  updateTransferResumeToken,
+  runMaintenance,
 } from './db.js'
 
 const PORT = parseInt(process.env.SYNC_PORT || '3001', 10)
+const DEVICE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
 
 // ── Sync code generation ─────────────────────────────────────────────────────
 
@@ -67,12 +85,10 @@ function generateSyncCode(): string {
 }
 
 function formatSyncCode(code: string): string {
-  // Group into blocks of 6 for readability: XXXXXX-XXXXXX-XXXXXX-...
   return code.match(/.{1,6}/g)?.join('-') ?? code
 }
 
 function normalizeSyncCode(input: string): string {
-  // Strip dashes, spaces, and other separators
   return input.replace(/[-\s]/g, '')
 }
 
@@ -88,7 +104,6 @@ function issueJoinToken(roomId: string): string {
   const exp = Date.now() + TOKEN_TTL_MS
   const payload = `${roomId}:${exp}`
   const sig = createHmac('sha256', JOIN_TOKEN_SECRET).update(payload).digest('hex')
-  // Base64-encode the full token
   return Buffer.from(`${payload}:${sig}`).toString('base64')
 }
 
@@ -130,21 +145,21 @@ setInterval(() => {
 }, 300_000)
 
 interface RateLimitConfig {
-  windowMs: number     // Time window in ms
-  maxRequests: number  // Max requests per window
-  blockMs: number      // Block duration after exceeding limit
+  windowMs: number
+  maxRequests: number
+  blockMs: number
 }
 
 const API_RATE_LIMIT: RateLimitConfig = {
-  windowMs: 60_000,     // 1 minute window
-  maxRequests: 10,       // 10 requests per minute
-  blockMs: 300_000,      // 5 minute block
+  windowMs: 60_000,
+  maxRequests: 10,
+  blockMs: 300_000,
 }
 
 const WS_JOIN_RATE_LIMIT: RateLimitConfig = {
   windowMs: 60_000,
-  maxRequests: 5,        // 5 join attempts per minute
-  blockMs: 600_000,      // 10 minute block
+  maxRequests: 5,
+  blockMs: 600_000,
 }
 
 function checkRateLimit(key: string, config: RateLimitConfig): { allowed: boolean; retryAfter?: number } {
@@ -175,12 +190,10 @@ function getClientIp(req: IncomingMessage): string {
   return req.socket.remoteAddress ?? 'unknown'
 }
 
-// ── Global request rate limit (DDoS protection) ─────────────────────────────
-
 const GLOBAL_RATE_LIMIT: RateLimitConfig = {
-  windowMs: 1_000,      // 1 second window
-  maxRequests: 50,       // 50 requests per second per IP
-  blockMs: 60_000,       // 1 minute block
+  windowMs: 1_000,
+  maxRequests: 50,
+  blockMs: 60_000,
 }
 
 // ── Room management ──────────────────────────────────────────────────────────
@@ -188,6 +201,8 @@ const GLOBAL_RATE_LIMIT: RateLimitConfig = {
 interface Client {
   ws: WebSocket
   roomId: string | null
+  deviceId: string | null
+  deviceName: string | null
 }
 
 const rooms = new Map<string, Set<Client>>()
@@ -212,12 +227,28 @@ function broadcast(roomId: string, sender: Client, msg: object): void {
   }
 }
 
+function sendToDevice(roomId: string, deviceId: string, msg: object): boolean {
+  const room = rooms.get(roomId)
+  if (!room) return false
+  const payload = JSON.stringify(msg)
+  for (const client of room) {
+    if (client.deviceId === deviceId && client.ws.readyState === WebSocket.OPEN) {
+      client.ws.send(payload)
+      return true
+    }
+  }
+  return false
+}
+
 function removeClient(client: Client): void {
   if (client.roomId) {
     const room = rooms.get(client.roomId)
     if (room) {
       room.delete(client)
-      broadcast(client.roomId, client, { type: 'device-left' })
+      broadcast(client.roomId, client, {
+        type: 'device-left',
+        deviceId: client.deviceId,
+      })
       if (room.size === 0) rooms.delete(client.roomId)
     }
   }
@@ -264,7 +295,7 @@ const httpServer = createServer(async (req, res) => {
     return
   }
 
-  // ── Health check ─────────────────────────────────────────────
+  // ── Health check ─────────────────────────────────────────
   if (req.url === '/api/health' && req.method === 'GET') {
     jsonResponse(res, 200, { status: 'ok', rooms: rooms.size })
     return
@@ -282,7 +313,6 @@ const httpServer = createServer(async (req, res) => {
     const syncCode = generateSyncCode()
     const roomId = deriveRoomId(syncCode)
 
-    // Register the room ID in the database
     registerSyncCode(roomId)
 
     const token = issueJoinToken(roomId)
@@ -299,8 +329,8 @@ const httpServer = createServer(async (req, res) => {
   if (req.url === '/api/sync-code/validate' && req.method === 'POST') {
     const rl = checkRateLimit(`val:${ip}`, {
       windowMs: 60_000,
-      maxRequests: 5,      // Stricter: only 5 validation attempts per minute
-      blockMs: 600_000,    // 10 minute block on abuse
+      maxRequests: 5,
+      blockMs: 600_000,
     })
     if (!rl.allowed) {
       res.writeHead(429, { 'Retry-After': String(rl.retryAfter ?? 600) })
@@ -326,7 +356,6 @@ const httpServer = createServer(async (req, res) => {
       const exists = syncCodeExists(roomId)
 
       if (!exists) {
-        // Intentionally vague error to prevent enumeration
         jsonResponse(res, 401, { error: 'Invalid sync code' })
         return
       }
@@ -345,10 +374,10 @@ const httpServer = createServer(async (req, res) => {
 
 // ── WebSocket server ─────────────────────────────────────────────────────────
 
-const wss = new WebSocketServer({ server: httpServer, path: '/ws' })
+const wss = new WebSocketServer({ server: httpServer, path: '/ws', maxPayload: 16 * 1024 * 1024 })
 
 wss.on('connection', (ws, req) => {
-  const client: Client = { ws, roomId: null }
+  const client: Client = { ws, roomId: null, deviceId: null, deviceName: null }
   const ip = getClientIp(req)
 
   ws.on('message', (raw) => {
@@ -379,9 +408,15 @@ function handleMessage(client: Client, msg: Record<string, unknown>, ip: string)
   if (type === 'join') {
     const roomId = msg.roomId as string
     const token = msg.token as string
+    const deviceId = msg.deviceId as string
+    const deviceName = (msg.deviceName as string) || 'Unknown Device'
 
     if (!roomId || typeof roomId !== 'string' || roomId.length < 8) {
       client.ws.send(JSON.stringify({ type: 'error', message: 'Invalid roomId' }))
+      return
+    }
+    if (!deviceId || typeof deviceId !== 'string') {
+      client.ws.send(JSON.stringify({ type: 'error', message: 'Missing deviceId' }))
       return
     }
 
@@ -410,137 +445,326 @@ function handleMessage(client: Client, msg: Record<string, unknown>, ip: string)
     // Leave previous room if any
     removeClient(client)
 
+    // Register/update device in DB
+    const device = registerDevice(roomId, deviceId, deviceName)
+
     client.roomId = roomId
+    client.deviceId = deviceId
+    client.deviceName = deviceName
     const room = getRoom(roomId)
     room.add(client)
 
-    // Send welcome with device count
+    // Check if this is a new device (cursor = 0 and other devices exist)
+    const allDevices = getDevices(roomId)
+    const otherDevices = allDevices.filter(d => d.deviceId !== deviceId)
+    const isNewDevice = device.cursor === 0 && otherDevices.length > 0
+    const maxSeq = getMaxSeq(roomId)
+    const hasPendingOps = device.cursor < maxSeq
+
+    // Send welcome
     client.ws.send(JSON.stringify({
       type: 'welcome',
       deviceCount: room.size,
+      cursor: device.cursor,
+      maxSeq,
+      needsTransfer: isNewDevice,
+      devices: allDevices.map(d => ({ deviceId: d.deviceId, deviceName: d.deviceName })),
     }))
 
     // Notify other devices
-    broadcast(roomId, client, { type: 'device-joined' })
+    broadcast(roomId, client, { type: 'device-joined', deviceId, deviceName })
 
-    // Send full sync (all notes + deletions)
-    const notes = getAllNotes(roomId).map(n => ({
-      noteId: n.noteId,
-      data: n.data.toString('base64'),
-      updatedAt: n.updatedAt,
-    }))
-    const deletions = getAllDeletions(roomId)
-
-    client.ws.send(JSON.stringify({ type: 'sync', notes, deletions }))
+    // If device has pending ops, send them
+    if (hasPendingOps && !isNewDevice) {
+      const ops = getOpsSince(roomId, device.cursor, 500)
+      if (ops.length > 0) {
+        client.ws.send(JSON.stringify({
+          type: 'ops',
+          entries: ops.map(op => ({
+            seq: op.id,
+            payload: op.payload.toString('base64'),
+            deviceId: op.deviceId,
+            createdAt: op.createdAt,
+          })),
+        }))
+      }
+    }
     return
   }
 
   // All other messages require a room
-  if (!client.roomId) {
-    client.ws.send(JSON.stringify({ type: 'error', message: 'Not in a room. Send { type: "join", roomId, token } first.' }))
+  if (!client.roomId || !client.deviceId) {
+    client.ws.send(JSON.stringify({ type: 'error', message: 'Not in a room. Send { type: "join" } first.' }))
     return
   }
 
   const roomId = client.roomId
+  const deviceId = client.deviceId
 
-  // ── Push a note ──────────────────────────────────────────────────────────
-  if (type === 'push-note') {
-    const noteId = msg.noteId as string
-    const dataB64 = msg.data as string
-    const updatedAt = msg.updatedAt as number
-    if (!noteId || !dataB64 || !updatedAt) {
-      client.ws.send(JSON.stringify({ type: 'error', message: 'Missing fields for push-note' }))
+  // ── Push an operation ──────────────────────────────────────────────────────
+  if (type === 'push-op') {
+    const payloadB64 = msg.payload as string
+    if (!payloadB64) {
+      client.ws.send(JSON.stringify({ type: 'error', message: 'Missing payload for push-op' }))
       return
     }
 
-    const buf = Buffer.from(dataB64, 'base64')
-    const stored = upsertNote(roomId, noteId, buf, updatedAt)
+    const buf = Buffer.from(payloadB64, 'base64')
+    const seq = appendOp(roomId, deviceId, buf)
 
-    if (stored) {
-      // Broadcast to other devices in real-time
-      broadcast(roomId, client, {
-        type: 'note-update',
-        noteId,
-        data: dataB64,
-        updatedAt,
-      })
+    // Update sender's cursor to their own op
+    updateDeviceCursor(roomId, deviceId, seq)
+
+    // Broadcast to other devices in real-time
+    broadcast(roomId, client, {
+      type: 'op-broadcast',
+      seq,
+      payload: payloadB64,
+      deviceId,
+    })
+
+    // Confirm to sender
+    client.ws.send(JSON.stringify({ type: 'ack', cursor: seq }))
+
+    // Try to truncate delivered ops
+    truncateDeliveredOps(roomId)
+    return
+  }
+
+  // ── Acknowledge receipt (advance cursor) ───────────────────────────────────
+  if (type === 'ack') {
+    const cursor = msg.cursor as number
+    if (typeof cursor !== 'number' || cursor < 0) {
+      client.ws.send(JSON.stringify({ type: 'error', message: 'Invalid cursor' }))
+      return
+    }
+
+    updateDeviceCursor(roomId, deviceId, cursor)
+    touchDevice(roomId, deviceId)
+
+    // Try to truncate delivered ops
+    truncateDeliveredOps(roomId)
+    return
+  }
+
+  // ── Request transfer (new device wants notes from existing device) ─────────
+  if (type === 'request-transfer') {
+    // Check if there are other devices in this room
+    const allDevices = getDevices(roomId)
+    const otherDevices = allDevices.filter(d => d.deviceId !== deviceId)
+    if (otherDevices.length === 0) {
+      client.ws.send(JSON.stringify({ type: 'error', message: 'No other devices available for transfer' }))
+      return
+    }
+
+    // Create transfer request
+    const transferId = createTransfer(roomId, deviceId)
+
+    // Notify all other online devices about the transfer request
+    broadcast(roomId, client, {
+      type: 'transfer-requested',
+      transferId,
+      requesterId: deviceId,
+      requesterName: client.deviceName || 'Unknown Device',
+    })
+
+    client.ws.send(JSON.stringify({ type: 'transfer-pending', transferId }))
+    return
+  }
+
+  // ── Approve transfer ───────────────────────────────────────────────────────
+  if (type === 'approve-transfer') {
+    const transferId = msg.transferId as number
+    if (!transferId) {
+      client.ws.send(JSON.stringify({ type: 'error', message: 'Missing transferId' }))
+      return
+    }
+
+    const transfer = getTransfer(transferId)
+    if (!transfer || transfer.roomId !== roomId || transfer.status !== 'pending') {
+      client.ws.send(JSON.stringify({ type: 'error', message: 'Transfer not found or already processed' }))
+      return
+    }
+
+    approveTransfer(transferId, deviceId)
+
+    // Notify the requester that transfer was approved
+    sendToDevice(roomId, transfer.requesterId, {
+      type: 'transfer-approved',
+      transferId,
+      approverId: deviceId,
+      approverName: client.deviceName || 'Unknown Device',
+    })
+    return
+  }
+
+  // ── Deny transfer ──────────────────────────────────────────────────────────
+  if (type === 'deny-transfer') {
+    const transferId = msg.transferId as number
+    if (!transferId) {
+      client.ws.send(JSON.stringify({ type: 'error', message: 'Missing transferId' }))
+      return
+    }
+
+    const transfer = getTransfer(transferId)
+    if (!transfer || transfer.roomId !== roomId || transfer.status !== 'pending') {
+      client.ws.send(JSON.stringify({ type: 'error', message: 'Transfer not found or already processed' }))
+      return
+    }
+
+    updateTransferStatus(transferId, 'cancelled')
+
+    // Notify the requester
+    sendToDevice(roomId, transfer.requesterId, {
+      type: 'transfer-denied',
+      transferId,
+    })
+    return
+  }
+
+  // ── Send transfer chunk (approver sends data to requester) ─────────────────
+  if (type === 'transfer-chunk') {
+    const transferId = msg.transferId as number
+    const chunk = msg.chunk as string
+    const chunkIndex = msg.chunkIndex as number
+    const totalChunks = msg.totalChunks as number
+    const resumeToken = msg.resumeToken as string
+
+    if (!transferId || !chunk || typeof chunkIndex !== 'number' || typeof totalChunks !== 'number') {
+      client.ws.send(JSON.stringify({ type: 'error', message: 'Missing fields for transfer-chunk' }))
+      return
+    }
+
+    const transfer = getTransfer(transferId)
+    if (!transfer || transfer.roomId !== roomId) {
+      client.ws.send(JSON.stringify({ type: 'error', message: 'Transfer not found' }))
+      return
+    }
+    if (transfer.approverId !== deviceId) {
+      client.ws.send(JSON.stringify({ type: 'error', message: 'Not authorized to send chunks for this transfer' }))
+      return
+    }
+
+    // Update status to in_progress on first chunk
+    if (transfer.status === 'approved') {
+      updateTransferStatus(transferId, 'in_progress')
+    }
+
+    // Save resume token
+    if (resumeToken) {
+      updateTransferResumeToken(transferId, resumeToken)
+    }
+
+    // Relay chunk to the requester
+    sendToDevice(roomId, transfer.requesterId, {
+      type: 'transfer-chunk',
+      transferId,
+      chunk,
+      chunkIndex,
+      totalChunks,
+      resumeToken,
+    })
+    return
+  }
+
+  // ── Resume transfer (requester asks to continue from where it left off) ────
+  if (type === 'transfer-resume') {
+    const transferId = msg.transferId as number
+    const resumeToken = msg.resumeToken as string
+
+    if (!transferId) {
+      client.ws.send(JSON.stringify({ type: 'error', message: 'Missing transferId' }))
+      return
+    }
+
+    const transfer = getTransfer(transferId)
+    if (!transfer || transfer.roomId !== roomId || transfer.requesterId !== deviceId) {
+      client.ws.send(JSON.stringify({ type: 'error', message: 'Transfer not found or not yours' }))
+      return
+    }
+
+    if (!transfer.approverId) {
+      client.ws.send(JSON.stringify({ type: 'error', message: 'Transfer not yet approved' }))
+      return
+    }
+
+    // Notify the approver to resume sending
+    sendToDevice(roomId, transfer.approverId, {
+      type: 'transfer-resume',
+      transferId,
+      resumeToken: resumeToken || transfer.resumeToken,
+    })
+    return
+  }
+
+  // ── Transfer complete ──────────────────────────────────────────────────────
+  if (type === 'transfer-complete') {
+    const transferId = msg.transferId as number
+    if (!transferId) {
+      client.ws.send(JSON.stringify({ type: 'error', message: 'Missing transferId' }))
+      return
+    }
+
+    const transfer = getTransfer(transferId)
+    if (!transfer || transfer.roomId !== roomId) {
+      client.ws.send(JSON.stringify({ type: 'error', message: 'Transfer not found' }))
+      return
+    }
+
+    updateTransferStatus(transferId, 'completed')
+
+    // Update the new device's cursor to current max so it doesn't replay ops
+    // that were part of the transfer
+    const maxSeq = getMaxSeq(roomId)
+    updateDeviceCursor(roomId, transfer.requesterId, maxSeq)
+
+    // Notify both parties
+    sendToDevice(roomId, transfer.requesterId, { type: 'transfer-complete', transferId })
+    if (transfer.approverId) {
+      sendToDevice(roomId, transfer.approverId, { type: 'transfer-complete', transferId })
     }
     return
   }
 
-  // ── Delete a note ────────────────────────────────────────────────────────
-  if (type === 'delete-note') {
-    const noteId = msg.noteId as string
-    const deletedAt = (msg.deletedAt as number) || Date.now()
-    if (!noteId) {
-      client.ws.send(JSON.stringify({ type: 'error', message: 'Missing noteId' }))
-      return
-    }
-
-    deleteNote(roomId, noteId, deletedAt)
-    broadcast(roomId, client, { type: 'note-deleted', noteId, deletedAt })
-    return
-  }
-
-  // ── Push media ───────────────────────────────────────────────────────────
-  if (type === 'push-media') {
-    const mediaId = msg.mediaId as string
-    const dataB64 = msg.data as string
-    if (!mediaId || !dataB64) {
-      client.ws.send(JSON.stringify({ type: 'error', message: 'Missing fields for push-media' }))
-      return
-    }
-
-    // Skip if we already have it
-    if (!hasMedia(roomId, mediaId)) {
-      putMediaBlob(roomId, mediaId, Buffer.from(dataB64, 'base64'))
-    }
-    return
-  }
-
-  // ── Pull changes since timestamp ─────────────────────────────────────────
+  // ── Pull ops (request missed ops since cursor) ─────────────────────────────
   if (type === 'pull') {
-    const since = (msg.since as number) || 0
+    const since = (msg.since as number) ?? getDevice(roomId, deviceId)?.cursor ?? 0
+    const limit = (msg.limit as number) || 500
 
-    const notes = getNotesSince(roomId, since).map(n => ({
-      noteId: n.noteId,
-      data: n.data.toString('base64'),
-      updatedAt: n.updatedAt,
+    const ops = getOpsSince(roomId, since, limit)
+    client.ws.send(JSON.stringify({
+      type: 'ops',
+      entries: ops.map(op => ({
+        seq: op.id,
+        payload: op.payload.toString('base64'),
+        deviceId: op.deviceId,
+        createdAt: op.createdAt,
+      })),
     }))
-    const deletions = getDeletionsSince(roomId, since)
-
-    client.ws.send(JSON.stringify({ type: 'sync', notes, deletions }))
-    return
-  }
-
-  // ── Pull a specific media blob ───────────────────────────────────────────
-  if (type === 'pull-media') {
-    const mediaId = msg.mediaId as string
-    if (!mediaId) {
-      client.ws.send(JSON.stringify({ type: 'error', message: 'Missing mediaId' }))
-      return
-    }
-
-    const blob = getMediaBlob(roomId, mediaId)
-    if (blob) {
-      client.ws.send(JSON.stringify({
-        type: 'media-data',
-        mediaId,
-        data: blob.toString('base64'),
-      }))
-    } else {
-      client.ws.send(JSON.stringify({ type: 'error', message: `Media ${mediaId} not found` }))
-    }
     return
   }
 
   client.ws.send(JSON.stringify({ type: 'error', message: `Unknown message type: ${type}` }))
 }
 
+// ── Maintenance: run every hour ──────────────────────────────────────────────
+
+setInterval(() => {
+  try {
+    const result = runMaintenance(DEVICE_MAX_AGE_MS)
+    if (result.devicesRemoved > 0 || result.opsRemoved > 0) {
+      console.log(`[maintenance] Removed ${result.devicesRemoved} stale device(s), truncated ${result.opsRemoved} op(s)`)
+    }
+  } catch (e) {
+    console.error('[maintenance] Error:', e)
+  }
+}, 60 * 60 * 1000) // every hour
+
 // ── Start ────────────────────────────────────────────────────────────────────
 
 httpServer.listen(PORT, () => {
-  console.log(`[sync-server] listening on :${PORT} (ws + http)`)
+  console.log(`[sync-server] Ephemeral relay listening on :${PORT} (ws + http)`)
+  console.log(`[sync-server] Device TTL: 30 days | Maintenance: hourly`)
 })
 
 // Graceful shutdown

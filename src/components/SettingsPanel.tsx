@@ -26,6 +26,8 @@ import {
   getSyncCode,
   generateSyncCode,
   validateSyncCode,
+  approveTransfer,
+  denyTransfer,
   type SyncState,
 } from '../utils/sync'
 import {
@@ -797,10 +799,11 @@ function SyncPage({ syncState, onTriggerSync, onSyncEnabled, onSyncDisabled }: S
     syncState.status === 'connecting' ? 'Connecting…' :
     syncState.status === 'offline' ? 'Offline' :
     syncState.status === 'error' ? 'Error' :
+    syncState.status === 'transferring' ? 'Transferring…' :
     syncState.status === 'idle' ? 'Connected' : 'Off'
 
   const statusClass =
-    syncState.status === 'syncing' || syncState.status === 'connecting' ? 'sync-status--syncing' :
+    syncState.status === 'syncing' || syncState.status === 'connecting' || syncState.status === 'transferring' ? 'sync-status--syncing' :
     syncState.status === 'error' ? 'sync-status--error' :
     syncState.status === 'offline' ? 'sync-status--error' :
     syncState.status === 'idle' ? 'sync-status--ok' : ''
@@ -816,6 +819,50 @@ function SyncPage({ syncState, onTriggerSync, onSyncEnabled, onSyncDisabled }: S
 
   return (
     <div className="settings-panel">
+
+      {/* ── Transfer approval modal ─────────────────────── */}
+      {syncState.pendingTransfer && (
+        <div className="settings-section" style={{ background: 'var(--bg-secondary, #f5f5f5)', borderRadius: 8, padding: 14, marginBottom: 12 }}>
+          <p className="settings-label" style={{ color: 'var(--accent, #4a9eff)' }}>Transfer Request</p>
+          <p className="settings-hint" style={{ marginTop: 0, marginBottom: 10 }}>
+            <strong>{syncState.pendingTransfer.requesterName}</strong> wants to sync your notes. This will send your notes to that device.
+          </p>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button
+              className="settings-save-btn"
+              onClick={() => approveTransfer(syncState.pendingTransfer!.transferId)}
+              style={{ flex: 1 }}
+            >
+              Approve
+            </button>
+            <button
+              className="settings-danger-btn"
+              onClick={() => denyTransfer(syncState.pendingTransfer!.transferId)}
+              style={{ flex: 1 }}
+            >
+              Deny
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Transfer progress ─────────────────────────────── */}
+      {syncState.transferProgress && syncState.transferProgress.total > 0 && (
+        <div className="settings-section">
+          <p className="settings-label">Transfer Progress</p>
+          <div style={{ background: 'var(--bg-secondary, #f5f5f5)', borderRadius: 6, height: 6, overflow: 'hidden' }}>
+            <div style={{
+              background: 'var(--accent, #4a9eff)',
+              height: '100%',
+              width: `${(syncState.transferProgress.current / syncState.transferProgress.total) * 100}%`,
+              transition: 'width 0.3s ease',
+            }} />
+          </div>
+          <p className="settings-hint" style={{ marginTop: 6 }}>
+            Chunk {syncState.transferProgress.current} of {syncState.transferProgress.total}
+          </p>
+        </div>
+      )}
 
       {/* ── Status section (when enabled) ─────────────────── */}
       {enabled && (
@@ -1022,8 +1069,10 @@ function SyncPage({ syncState, onTriggerSync, onSyncEnabled, onSyncDisabled }: S
 
       <p className="settings-hint">
         Sync connects your devices via a secure WebSocket channel. Your notes are end-to-end encrypted
-        with a unique code that only you possess — the server only stores opaque blobs it cannot read.
+        with a unique code that only you possess — the server never stores your data permanently.
+        It only relays encrypted changes until all your devices have received them, then deletes them.
         The sync code has 143 bits of entropy, making brute-force attacks computationally infeasible.
+        New devices must be approved by an existing device before receiving notes.
         Credentials (FB, S3, etc.) never leave your device.
       </p>
     </div>

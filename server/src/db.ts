@@ -1,16 +1,18 @@
 /**
- * SQLite storage for encrypted sync data.
+ * SQLite storage for ephemeral relay sync.
+ *
+ * Architecture: The server stores NOTHING permanently. It is a mailbox, not a vault.
  *
  * Tables:
- *   notes  — one row per note per room (roomId, noteId, encryptedBlob, updatedAt)
- *   media  — one row per media blob per room (roomId, mediaId, encryptedBlob)
- *   deleted — tombstones (roomId, noteId, deletedAt)
+ *   sync_codes — registered room IDs
+ *   devices    — registered devices per room with cursor + last_seen
+ *   ops_log    — sequential operations log (ephemeral, auto-truncated)
+ *   transfers  — pending peer-to-peer transfer requests
  */
 
 import Database from 'better-sqlite3'
 import { join } from 'node:path'
 import { mkdirSync } from 'node:fs'
-import { serverEncrypt, serverDecrypt } from './crypto.js'
 
 const DATA_DIR = process.env.SYNC_DATA_DIR || '/data/sync'
 mkdirSync(DATA_DIR, { recursive: true })
@@ -21,174 +23,55 @@ const db = new Database(join(DATA_DIR, 'sync.db'))
 db.pragma('journal_mode = WAL')
 db.pragma('busy_timeout = 5000')
 
+// ── Schema migration: drop legacy tables, create new ones ───────────────────
+
+// Drop legacy tables from the old permanent-storage architecture
 db.exec(`
-  CREATE TABLE IF NOT EXISTS notes (
-    room_id     TEXT NOT NULL,
-    note_id     TEXT NOT NULL,
-    data        BLOB NOT NULL,
-    updated_at  INTEGER NOT NULL,
-    PRIMARY KEY (room_id, note_id)
-  );
+  DROP TABLE IF EXISTS notes;
+  DROP TABLE IF EXISTS media;
+  DROP TABLE IF EXISTS deleted;
+`)
 
-  CREATE TABLE IF NOT EXISTS media (
-    room_id     TEXT NOT NULL,
-    media_id    TEXT NOT NULL,
-    data        BLOB NOT NULL,
-    created_at  INTEGER NOT NULL DEFAULT (unixepoch() * 1000),
-    PRIMARY KEY (room_id, media_id)
-  );
-
-  CREATE TABLE IF NOT EXISTS deleted (
-    room_id     TEXT NOT NULL,
-    note_id     TEXT NOT NULL,
-    deleted_at  INTEGER NOT NULL,
-    PRIMARY KEY (room_id, note_id)
-  );
-
+db.exec(`
   CREATE TABLE IF NOT EXISTS sync_codes (
     room_id     TEXT PRIMARY KEY,
     created_at  INTEGER NOT NULL DEFAULT (unixepoch() * 1000)
   );
 
-  CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(room_id, updated_at);
-  CREATE INDEX IF NOT EXISTS idx_deleted_at ON deleted(room_id, deleted_at);
+  CREATE TABLE IF NOT EXISTS devices (
+    room_id       TEXT NOT NULL,
+    device_id     TEXT NOT NULL,
+    device_name   TEXT NOT NULL DEFAULT 'Unknown Device',
+    cursor        INTEGER NOT NULL DEFAULT 0,
+    last_seen_at  INTEGER NOT NULL DEFAULT (unixepoch() * 1000),
+    created_at    INTEGER NOT NULL DEFAULT (unixepoch() * 1000),
+    PRIMARY KEY (room_id, device_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS ops_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    room_id     TEXT NOT NULL,
+    device_id   TEXT NOT NULL,
+    payload     BLOB NOT NULL,
+    created_at  INTEGER NOT NULL DEFAULT (unixepoch() * 1000)
+  );
+
+  CREATE TABLE IF NOT EXISTS transfers (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    room_id         TEXT NOT NULL,
+    requester_id    TEXT NOT NULL,
+    approver_id     TEXT,
+    status          TEXT NOT NULL DEFAULT 'pending',
+    resume_token    TEXT,
+    created_at      INTEGER NOT NULL DEFAULT (unixepoch() * 1000),
+    updated_at      INTEGER NOT NULL DEFAULT (unixepoch() * 1000)
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_ops_room_id ON ops_log(room_id, id);
+  CREATE INDEX IF NOT EXISTS idx_devices_room ON devices(room_id);
+  CREATE INDEX IF NOT EXISTS idx_devices_last_seen ON devices(last_seen_at);
+  CREATE INDEX IF NOT EXISTS idx_transfers_room ON transfers(room_id, status);
 `)
-
-// ── Migration: backfill sync_codes from existing rooms ──────────────────────
-// Existing deployments have room_ids in notes/media/deleted but no sync_codes
-// entry. Register them so legacy password-based users can still connect.
-const migrateExistingRooms = db.prepare(`
-  INSERT OR IGNORE INTO sync_codes (room_id)
-  SELECT DISTINCT room_id FROM notes
-  UNION
-  SELECT DISTINCT room_id FROM media
-  UNION
-  SELECT DISTINCT room_id FROM deleted
-`)
-const migrated = migrateExistingRooms.run()
-if (migrated.changes > 0) {
-  console.log(`[db] Migrated ${migrated.changes} existing room(s) into sync_codes table`)
-}
-
-// ── Note operations ──────────────────────────────────────────────────────────
-
-const stmtUpsertNote = db.prepare(`
-  INSERT INTO notes (room_id, note_id, data, updated_at)
-  VALUES (?, ?, ?, ?)
-  ON CONFLICT(room_id, note_id) DO UPDATE SET
-    data = excluded.data,
-    updated_at = excluded.updated_at
-  WHERE excluded.updated_at > notes.updated_at
-`)
-
-const stmtGetNote = db.prepare(`
-  SELECT data, updated_at FROM notes WHERE room_id = ? AND note_id = ?
-`)
-
-const stmtGetNotesSince = db.prepare(`
-  SELECT note_id, data, updated_at FROM notes
-  WHERE room_id = ? AND updated_at > ?
-  ORDER BY updated_at ASC
-`)
-
-const stmtGetAllNotes = db.prepare(`
-  SELECT note_id, data, updated_at FROM notes WHERE room_id = ?
-`)
-
-const stmtDeleteNote = db.prepare(`
-  DELETE FROM notes WHERE room_id = ? AND note_id = ?
-`)
-
-export interface StoredNote {
-  noteId: string
-  data: Buffer
-  updatedAt: number
-}
-
-export function upsertNote(roomId: string, noteId: string, clientEncrypted: Buffer, updatedAt: number): boolean {
-  const doubleEncrypted = serverEncrypt(clientEncrypted)
-  const result = stmtUpsertNote.run(roomId, noteId, doubleEncrypted, updatedAt)
-  return result.changes > 0
-}
-
-export function getNote(roomId: string, noteId: string): StoredNote | null {
-  const row = stmtGetNote.get(roomId, noteId) as { data: Buffer; updated_at: number } | undefined
-  if (!row) return null
-  return { noteId, data: serverDecrypt(row.data), updatedAt: row.updated_at }
-}
-
-export function getNotesSince(roomId: string, since: number): StoredNote[] {
-  const rows = stmtGetNotesSince.all(roomId, since) as { note_id: string; data: Buffer; updated_at: number }[]
-  return rows.map(r => ({ noteId: r.note_id, data: serverDecrypt(r.data), updatedAt: r.updated_at }))
-}
-
-export function getAllNotes(roomId: string): StoredNote[] {
-  const rows = stmtGetAllNotes.all(roomId) as { note_id: string; data: Buffer; updated_at: number }[]
-  return rows.map(r => ({ noteId: r.note_id, data: serverDecrypt(r.data), updatedAt: r.updated_at }))
-}
-
-export function deleteNote(roomId: string, noteId: string, deletedAt: number): void {
-  stmtDeleteNote.run(roomId, noteId)
-  stmtRecordDeletion.run(roomId, noteId, deletedAt)
-}
-
-// ── Deletion operations ──────────────────────────────────────────────────────
-
-const stmtRecordDeletion = db.prepare(`
-  INSERT OR REPLACE INTO deleted (room_id, note_id, deleted_at) VALUES (?, ?, ?)
-`)
-
-const stmtGetDeletionsSince = db.prepare(`
-  SELECT note_id, deleted_at FROM deleted WHERE room_id = ? AND deleted_at > ?
-`)
-
-const stmtGetAllDeletions = db.prepare(`
-  SELECT note_id, deleted_at FROM deleted WHERE room_id = ?
-`)
-
-export interface Deletion {
-  noteId: string
-  deletedAt: number
-}
-
-export function getDeletionsSince(roomId: string, since: number): Deletion[] {
-  const rows = stmtGetDeletionsSince.all(roomId, since) as { note_id: string; deleted_at: number }[]
-  return rows.map(r => ({ noteId: r.note_id, deletedAt: r.deleted_at }))
-}
-
-export function getAllDeletions(roomId: string): Deletion[] {
-  const rows = stmtGetAllDeletions.all(roomId) as { note_id: string; deleted_at: number }[]
-  return rows.map(r => ({ noteId: r.note_id, deletedAt: r.deleted_at }))
-}
-
-// ── Media operations ─────────────────────────────────────────────────────────
-
-const stmtUpsertMedia = db.prepare(`
-  INSERT OR REPLACE INTO media (room_id, media_id, data) VALUES (?, ?, ?)
-`)
-
-const stmtGetMedia = db.prepare(`
-  SELECT data FROM media WHERE room_id = ? AND media_id = ?
-`)
-
-const stmtHasMedia = db.prepare(`
-  SELECT 1 FROM media WHERE room_id = ? AND media_id = ?
-`)
-
-export function putMediaBlob(roomId: string, mediaId: string, clientEncrypted: Buffer): void {
-  const doubleEncrypted = serverEncrypt(clientEncrypted)
-  stmtUpsertMedia.run(roomId, mediaId, doubleEncrypted)
-}
-
-export function getMediaBlob(roomId: string, mediaId: string): Buffer | null {
-  const row = stmtGetMedia.get(roomId, mediaId) as { data: Buffer } | undefined
-  if (!row) return null
-  return serverDecrypt(row.data)
-}
-
-export function hasMedia(roomId: string, mediaId: string): boolean {
-  return !!stmtHasMedia.get(roomId, mediaId)
-}
 
 // ── Sync code operations ─────────────────────────────────────────────────────
 
@@ -206,4 +89,324 @@ export function registerSyncCode(roomId: string): void {
 
 export function syncCodeExists(roomId: string): boolean {
   return !!stmtSyncCodeExists.get(roomId)
+}
+
+// ── Device operations ────────────────────────────────────────────────────────
+
+export interface DeviceRecord {
+  deviceId: string
+  deviceName: string
+  cursor: number
+  lastSeenAt: number
+  createdAt: number
+}
+
+const stmtRegisterDevice = db.prepare(`
+  INSERT INTO devices (room_id, device_id, device_name, cursor, last_seen_at)
+  VALUES (?, ?, ?, 0, ?)
+  ON CONFLICT(room_id, device_id) DO UPDATE SET
+    device_name = excluded.device_name,
+    last_seen_at = excluded.last_seen_at
+`)
+
+const stmtGetDevice = db.prepare(`
+  SELECT device_id, device_name, cursor, last_seen_at, created_at
+  FROM devices WHERE room_id = ? AND device_id = ?
+`)
+
+const stmtGetDevices = db.prepare(`
+  SELECT device_id, device_name, cursor, last_seen_at, created_at
+  FROM devices WHERE room_id = ?
+`)
+
+const stmtUpdateCursor = db.prepare(`
+  UPDATE devices SET cursor = ?, last_seen_at = ? WHERE room_id = ? AND device_id = ?
+`)
+
+const stmtUpdateLastSeen = db.prepare(`
+  UPDATE devices SET last_seen_at = ? WHERE room_id = ? AND device_id = ?
+`)
+
+const stmtRemoveDevice = db.prepare(`
+  DELETE FROM devices WHERE room_id = ? AND device_id = ?
+`)
+
+const stmtGetStaleDevices = db.prepare(`
+  SELECT room_id, device_id FROM devices WHERE last_seen_at < ?
+`)
+
+const stmtGetMinCursor = db.prepare(`
+  SELECT MIN(cursor) as min_cursor FROM devices WHERE room_id = ?
+`)
+
+export function registerDevice(roomId: string, deviceId: string, deviceName: string): DeviceRecord {
+  const now = Date.now()
+  stmtRegisterDevice.run(roomId, deviceId, deviceName, now)
+  const row = stmtGetDevice.get(roomId, deviceId) as {
+    device_id: string; device_name: string; cursor: number; last_seen_at: number; created_at: number
+  }
+  return {
+    deviceId: row.device_id,
+    deviceName: row.device_name,
+    cursor: row.cursor,
+    lastSeenAt: row.last_seen_at,
+    createdAt: row.created_at,
+  }
+}
+
+export function getDevice(roomId: string, deviceId: string): DeviceRecord | null {
+  const row = stmtGetDevice.get(roomId, deviceId) as {
+    device_id: string; device_name: string; cursor: number; last_seen_at: number; created_at: number
+  } | undefined
+  if (!row) return null
+  return {
+    deviceId: row.device_id,
+    deviceName: row.device_name,
+    cursor: row.cursor,
+    lastSeenAt: row.last_seen_at,
+    createdAt: row.created_at,
+  }
+}
+
+export function getDevices(roomId: string): DeviceRecord[] {
+  const rows = stmtGetDevices.all(roomId) as {
+    device_id: string; device_name: string; cursor: number; last_seen_at: number; created_at: number
+  }[]
+  return rows.map(r => ({
+    deviceId: r.device_id,
+    deviceName: r.device_name,
+    cursor: r.cursor,
+    lastSeenAt: r.last_seen_at,
+    createdAt: r.created_at,
+  }))
+}
+
+export function updateDeviceCursor(roomId: string, deviceId: string, cursor: number): void {
+  stmtUpdateCursor.run(cursor, Date.now(), roomId, deviceId)
+}
+
+export function touchDevice(roomId: string, deviceId: string): void {
+  stmtUpdateLastSeen.run(Date.now(), roomId, deviceId)
+}
+
+export function removeDevice(roomId: string, deviceId: string): void {
+  stmtRemoveDevice.run(roomId, deviceId)
+}
+
+export function getStaleDevices(maxAge: number): { roomId: string; deviceId: string }[] {
+  const cutoff = Date.now() - maxAge
+  const rows = stmtGetStaleDevices.all(cutoff) as { room_id: string; device_id: string }[]
+  return rows.map(r => ({ roomId: r.room_id, deviceId: r.device_id }))
+}
+
+export function getMinCursorForRoom(roomId: string): number {
+  const row = stmtGetMinCursor.get(roomId) as { min_cursor: number | null } | undefined
+  return row?.min_cursor ?? 0
+}
+
+// ── Operations log ───────────────────────────────────────────────────────────
+
+export interface OpsLogEntry {
+  id: number
+  roomId: string
+  deviceId: string
+  payload: Buffer
+  createdAt: number
+}
+
+const stmtAppendOp = db.prepare(`
+  INSERT INTO ops_log (room_id, device_id, payload, created_at) VALUES (?, ?, ?, ?)
+`)
+
+const stmtGetOpsSince = db.prepare(`
+  SELECT id, room_id, device_id, payload, created_at
+  FROM ops_log WHERE room_id = ? AND id > ?
+  ORDER BY id ASC
+`)
+
+const stmtGetOpsSinceLimited = db.prepare(`
+  SELECT id, room_id, device_id, payload, created_at
+  FROM ops_log WHERE room_id = ? AND id > ?
+  ORDER BY id ASC LIMIT ?
+`)
+
+const stmtTruncateOps = db.prepare(`
+  DELETE FROM ops_log WHERE room_id = ? AND id <= ?
+`)
+
+const stmtGetMaxSeq = db.prepare(`
+  SELECT MAX(id) as max_seq FROM ops_log WHERE room_id = ?
+`)
+
+export function appendOp(roomId: string, deviceId: string, payload: Buffer): number {
+  const result = stmtAppendOp.run(roomId, deviceId, payload, Date.now())
+  return Number(result.lastInsertRowid)
+}
+
+export function getOpsSince(roomId: string, cursor: number, limit?: number): OpsLogEntry[] {
+  const rows = limit
+    ? stmtGetOpsSinceLimited.all(roomId, cursor, limit) as { id: number; room_id: string; device_id: string; payload: Buffer; created_at: number }[]
+    : stmtGetOpsSince.all(roomId, cursor) as { id: number; room_id: string; device_id: string; payload: Buffer; created_at: number }[]
+  return rows.map(r => ({
+    id: r.id,
+    roomId: r.room_id,
+    deviceId: r.device_id,
+    payload: r.payload,
+    createdAt: r.created_at,
+  }))
+}
+
+export function truncateOps(roomId: string, upToSeq: number): number {
+  const result = stmtTruncateOps.run(roomId, upToSeq)
+  return result.changes
+}
+
+export function getMaxSeq(roomId: string): number {
+  const row = stmtGetMaxSeq.get(roomId) as { max_seq: number | null } | undefined
+  return row?.max_seq ?? 0
+}
+
+/**
+ * Truncate ops for a room up to the minimum cursor of all active devices.
+ * Returns number of entries removed.
+ */
+export function truncateDeliveredOps(roomId: string): number {
+  const minCursor = getMinCursorForRoom(roomId)
+  if (minCursor <= 0) return 0
+  return truncateOps(roomId, minCursor)
+}
+
+// ── Transfer operations ──────────────────────────────────────────────────────
+
+export interface TransferRecord {
+  id: number
+  roomId: string
+  requesterId: string
+  approverId: string | null
+  status: 'pending' | 'approved' | 'in_progress' | 'completed' | 'cancelled'
+  resumeToken: string | null
+  createdAt: number
+  updatedAt: number
+}
+
+const stmtCreateTransfer = db.prepare(`
+  INSERT INTO transfers (room_id, requester_id, status, created_at, updated_at)
+  VALUES (?, ?, 'pending', ?, ?)
+`)
+
+const stmtGetPendingTransfers = db.prepare(`
+  SELECT id, room_id, requester_id, approver_id, status, resume_token, created_at, updated_at
+  FROM transfers WHERE room_id = ? AND status IN ('pending', 'approved', 'in_progress')
+`)
+
+const stmtGetTransfer = db.prepare(`
+  SELECT id, room_id, requester_id, approver_id, status, resume_token, created_at, updated_at
+  FROM transfers WHERE id = ?
+`)
+
+const stmtUpdateTransferStatus = db.prepare(`
+  UPDATE transfers SET status = ?, approver_id = COALESCE(?, approver_id), updated_at = ? WHERE id = ?
+`)
+
+const stmtUpdateTransferResume = db.prepare(`
+  UPDATE transfers SET resume_token = ?, updated_at = ? WHERE id = ?
+`)
+
+const stmtCleanupOldTransfers = db.prepare(`
+  DELETE FROM transfers WHERE created_at < ? OR status IN ('completed', 'cancelled')
+`)
+
+export function createTransfer(roomId: string, requesterId: string): number {
+  const now = Date.now()
+  const result = stmtCreateTransfer.run(roomId, requesterId, now, now)
+  return Number(result.lastInsertRowid)
+}
+
+export function getPendingTransfers(roomId: string): TransferRecord[] {
+  const rows = stmtGetPendingTransfers.all(roomId) as {
+    id: number; room_id: string; requester_id: string; approver_id: string | null;
+    status: string; resume_token: string | null; created_at: number; updated_at: number
+  }[]
+  return rows.map(r => ({
+    id: r.id,
+    roomId: r.room_id,
+    requesterId: r.requester_id,
+    approverId: r.approver_id,
+    status: r.status as TransferRecord['status'],
+    resumeToken: r.resume_token,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  }))
+}
+
+export function getTransfer(transferId: number): TransferRecord | null {
+  const row = stmtGetTransfer.get(transferId) as {
+    id: number; room_id: string; requester_id: string; approver_id: string | null;
+    status: string; resume_token: string | null; created_at: number; updated_at: number
+  } | undefined
+  if (!row) return null
+  return {
+    id: row.id,
+    roomId: row.room_id,
+    requesterId: row.requester_id,
+    approverId: row.approver_id,
+    status: row.status as TransferRecord['status'],
+    resumeToken: row.resume_token,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
+export function approveTransfer(transferId: number, approverId: string): void {
+  stmtUpdateTransferStatus.run('approved', approverId, Date.now(), transferId)
+}
+
+export function updateTransferStatus(transferId: number, status: TransferRecord['status']): void {
+  stmtUpdateTransferStatus.run(status, null, Date.now(), transferId)
+}
+
+export function updateTransferResumeToken(transferId: number, resumeToken: string): void {
+  stmtUpdateTransferResume.run(resumeToken, Date.now(), transferId)
+}
+
+export function cleanupTransfers(maxAgeMs: number): number {
+  const cutoff = Date.now() - maxAgeMs
+  const result = stmtCleanupOldTransfers.run(cutoff)
+  return result.changes
+}
+
+// ── Maintenance ──────────────────────────────────────────────────────────────
+
+/**
+ * Remove stale devices (inactive > maxAgeMs) and truncate delivered ops.
+ * Called periodically by the server.
+ */
+export function runMaintenance(maxDeviceAgeMs: number): { devicesRemoved: number; opsRemoved: number } {
+  let devicesRemoved = 0
+  let opsRemoved = 0
+
+  // Remove stale devices
+  const stale = getStaleDevices(maxDeviceAgeMs)
+  for (const { roomId, deviceId } of stale) {
+    removeDevice(roomId, deviceId)
+    devicesRemoved++
+  }
+
+  // Truncate delivered ops for all rooms that had stale devices removed
+  const affectedRooms = new Set(stale.map(s => s.roomId))
+  // Also truncate all rooms with active devices
+  const allRoomsStmt = db.prepare(`SELECT DISTINCT room_id FROM devices`)
+  const allRooms = allRoomsStmt.all() as { room_id: string }[]
+  for (const { room_id } of allRooms) {
+    affectedRooms.add(room_id)
+  }
+
+  for (const roomId of affectedRooms) {
+    opsRemoved += truncateDeliveredOps(roomId)
+  }
+
+  // Cleanup old/completed transfers
+  cleanupTransfers(maxDeviceAgeMs)
+
+  return { devicesRemoved, opsRemoved }
 }
