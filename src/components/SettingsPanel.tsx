@@ -266,6 +266,10 @@ export function SettingsPanel({
   const submitPassword = useCallback(async () => {
     if (!password.trim()) { setPwdError('Password is required.'); return }
     if (!modal) return
+    if (modal.mode === 'backup' && password.length < 8) {
+      setPwdError('Password must be at least 8 characters for backup encryption.')
+      return
+    }
     setOpRunning(true)
     setPwdError('')
     try {

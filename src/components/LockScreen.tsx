@@ -1,6 +1,55 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { unlockWithPin } from '../utils/vault'
 
+// ── Brute-force throttling ──────────────────────────────────────────────────
+
+const LOCKOUT_KEY = 'notes-pin-lockout'
+const MAX_ATTEMPTS = 5
+const BASE_LOCKOUT_MS = 30_000 // 30 seconds, doubles each escalation
+
+interface LockoutState {
+  attempts: number
+  lockedUntil: number // epoch ms, 0 = not locked
+  escalation: number  // how many times we've hit the limit
+}
+
+function getLockout(): LockoutState {
+  try {
+    const raw = localStorage.getItem(LOCKOUT_KEY)
+    if (!raw) return { attempts: 0, lockedUntil: 0, escalation: 0 }
+    return JSON.parse(raw) as LockoutState
+  } catch { return { attempts: 0, lockedUntil: 0, escalation: 0 } }
+}
+
+function setLockout(state: LockoutState): void {
+  localStorage.setItem(LOCKOUT_KEY, JSON.stringify(state))
+}
+
+function clearLockout(): void {
+  localStorage.removeItem(LOCKOUT_KEY)
+}
+
+function getRemainingLockMs(): number {
+  const state = getLockout()
+  if (!state.lockedUntil) return 0
+  return Math.max(0, state.lockedUntil - Date.now())
+}
+
+function recordFailedAttempt(): LockoutState {
+  const state = getLockout()
+  state.attempts += 1
+  if (state.attempts >= MAX_ATTEMPTS) {
+    const lockMs = BASE_LOCKOUT_MS * Math.pow(2, state.escalation)
+    state.lockedUntil = Date.now() + lockMs
+    state.escalation += 1
+    state.attempts = 0
+  }
+  setLockout(state)
+  return state
+}
+
+// ── Component ───────────────────────────────────────────────────────────────
+
 interface LockScreenProps {
   onUnlocked: () => void
 }
@@ -9,23 +58,52 @@ export function LockScreen({ onUnlocked }: LockScreenProps) {
   const [pin, setPin] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [lockedMs, setLockedMs] = useState<number>(getRemainingLockMs)
   const inputRef = useRef<HTMLInputElement>(null)
 
+  // Countdown timer for lockout display
   useEffect(() => {
-    inputRef.current?.focus()
-  }, [])
+    if (lockedMs <= 0) return
+    const timer = setInterval(() => {
+      const remaining = getRemainingLockMs()
+      setLockedMs(remaining)
+      if (remaining <= 0) { clearInterval(timer); setError(null) }
+    }, 1000)
+    return () => clearInterval(timer)
+  }, [lockedMs])
+
+  useEffect(() => {
+    if (lockedMs <= 0) inputRef.current?.focus()
+  }, [lockedMs])
 
   const handleSubmit = useCallback(async (e?: React.FormEvent) => {
     e?.preventDefault()
     if (!pin.trim() || busy) return
+
+    // Check lockout before attempting
+    const remaining = getRemainingLockMs()
+    if (remaining > 0) {
+      setLockedMs(remaining)
+      return
+    }
+
     setBusy(true)
     setError(null)
 
     const ok = await unlockWithPin(pin)
     if (ok) {
+      clearLockout()
       onUnlocked()
     } else {
-      setError('Incorrect PIN')
+      const state = recordFailedAttempt()
+      const lockRemaining = getRemainingLockMs()
+      if (lockRemaining > 0) {
+        setLockedMs(lockRemaining)
+        setError(`Too many attempts. Try again in ${Math.ceil(lockRemaining / 1000)}s.`)
+      } else {
+        const left = MAX_ATTEMPTS - state.attempts
+        setError(`Incorrect PIN. ${left} attempt${left === 1 ? '' : 's'} remaining.`)
+      }
       setPin('')
       setBusy(false)
       inputRef.current?.focus()
@@ -54,16 +132,18 @@ export function LockScreen({ onUnlocked }: LockScreenProps) {
             value={pin}
             onChange={(e) => setPin(e.target.value)}
             autoComplete="off"
-            disabled={busy}
+            disabled={busy || lockedMs > 0}
             maxLength={32}
           />
           {error && <p className="lock-screen-error">{error}</p>}
           <button
             type="submit"
             className="lock-screen-btn"
-            disabled={!pin.trim() || busy}
+            disabled={!pin.trim() || busy || lockedMs > 0}
           >
-            {busy ? 'Unlocking…' : 'Unlock'}
+            {lockedMs > 0
+              ? `Locked (${Math.ceil(lockedMs / 1000)}s)`
+              : busy ? 'Unlocking…' : 'Unlock'}
           </button>
         </form>
       </div>

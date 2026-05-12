@@ -100,6 +100,12 @@ function deriveRoomId(syncCode: string): string {
 const JOIN_TOKEN_SECRET = process.env.SYNC_SERVER_KEY || randomBytes(32).toString('hex')
 const TOKEN_TTL_MS = 60_000 // 60 seconds
 
+if (!process.env.SYNC_SERVER_KEY) {
+  console.warn('[sync-server] WARNING: SYNC_SERVER_KEY is not set. Using a random in-memory secret.')
+  console.warn('[sync-server] Join tokens will be invalidated on every server restart.')
+  console.warn('[sync-server] Set SYNC_SERVER_KEY in your environment for production use.')
+}
+
 function issueJoinToken(roomId: string): string {
   const exp = Date.now() + TOKEN_TTL_MS
   const payload = `${roomId}:${exp}`

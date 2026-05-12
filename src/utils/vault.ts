@@ -30,7 +30,7 @@ const KEY_ID = 'vault-key'
 const WRAPPED_KEY_ID = 'vault-key-wrapped'
 const PIN_SALT_ID = 'vault-pin-salt'
 const PIN_VERIFY_ID = 'vault-pin-verify'
-const VAULT_MIGRATED_KEY = 'notes-vault-migrated-v1'
+const VAULT_MIGRATED_KEY = 'notes-vault-migrated-v2'
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -305,7 +305,8 @@ const SENSITIVE_KEYS = new Set([
   'notes-app-v1',         // all notes
   'notes-s3-v1',          // S3 credentials
   'notes-fb-v1',          // Facebook token
-  'notes-sync-password',  // sync encryption password
+  'notes-sync-password',  // sync encryption password (legacy)
+  'notes-sync-code',      // sync encryption code
 ])
 
 /**
