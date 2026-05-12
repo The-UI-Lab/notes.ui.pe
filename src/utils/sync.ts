@@ -274,7 +274,7 @@ function shouldCreateConflictCopy(local: Note, remote: Note): boolean {
 let ws: WebSocket | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let callbacks: SyncCallbacks | null = null
-let currentTransferId: number | null = null
+let _currentTransferId: number | null = null
 let currentState: SyncState = {
   enabled: false,
   status: 'disabled',
@@ -485,7 +485,7 @@ async function handleServerMessage(msg: Record<string, unknown>): Promise<void> 
 
     case 'transfer-pending': {
       // Our transfer request is pending approval
-      currentTransferId = msg.transferId as number
+      _currentTransferId = msg.transferId as number
       updateState({ status: 'transferring', transferProgress: { current: 0, total: 0 } })
       break
     }
@@ -511,7 +511,7 @@ async function handleServerMessage(msg: Record<string, unknown>): Promise<void> 
 
     case 'transfer-denied': {
       // Transfer was denied
-      currentTransferId = null
+      _currentTransferId = null
       updateState({ status: 'idle', error: 'Transfer denied by the other device', transferProgress: undefined })
       break
     }
@@ -545,7 +545,7 @@ async function handleServerMessage(msg: Record<string, unknown>): Promise<void> 
       // If this was the last chunk, mark transfer complete
       if (chunkIndex + 1 >= totalChunks) {
         ws?.send(JSON.stringify({ type: 'transfer-complete', transferId }))
-        currentTransferId = null
+        _currentTransferId = null
         updateState({ status: 'idle', transferProgress: undefined })
         // Now push any local changes we made during transfer
         await pushAllNotes()
