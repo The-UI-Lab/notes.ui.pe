@@ -37,6 +37,11 @@ import {
   secureGet,
   secureSet,
 } from '../utils/vault'
+import {
+  connectFacebookPages,
+  isFbLoginAvailable,
+  type FbPage,
+} from '../utils/fb-login'
 
 // ── Export helper ──────────────────────────────────────────────────────────
 
@@ -465,60 +470,13 @@ export function SettingsPanel({
   // ── Page: Facebook Page Connector ──────────────────────────────────────
   if (settingsPage === 'facebook') {
     return (
-      <div className="settings-panel">
-        <div className="settings-section">
-          <p className="settings-label">Access Token</p>
-          <input
-            type="password"
-            className="settings-form-input"
-            placeholder="EAABwzLixnjYBO…"
-            value={fbDraft.accessToken}
-            onChange={e => setFbDraft(d => ({ ...d, accessToken: e.target.value }))}
-            autoComplete="off"
-            spellCheck={false}
-          />
-        </div>
-
-        <div className="settings-section">
-          <p className="settings-label">Page ID</p>
-          <input
-            type="text"
-            className="settings-form-input"
-            placeholder="123456789012345"
-            value={fbDraft.pageId}
-            onChange={e => setFbDraft(d => ({ ...d, pageId: e.target.value }))}
-            autoComplete="off"
-            spellCheck={false}
-          />
-        </div>
-
-        <div className="settings-section settings-section--actions">
-          <button
-            className="settings-save-btn"
-            onClick={saveFb}
-            disabled={!fbDraft.accessToken.trim() || !fbDraft.pageId.trim()}
-          >
-            Save
-          </button>
-          {fb.accessToken && fb.pageId && (
-            <button
-              className="settings-danger-btn"
-              onClick={() => {
-                const cleared = { accessToken: '', pageId: '' }
-                localStorage.removeItem(FB_KEY)
-                setFb(cleared)
-                setFbDraft(cleared)
-              }}
-            >
-              Disconnect
-            </button>
-          )}
-        </div>
-
-        <p className="settings-hint">
-          The access token and page ID are stored in your browser's local storage. They never leave your device.
-        </p>
-      </div>
+      <FacebookConnectPage
+        fb={fb}
+        fbDraft={fbDraft}
+        setFb={setFb}
+        setFbDraft={setFbDraft}
+        saveFb={saveFb}
+      />
     )
   }
 
@@ -722,6 +680,216 @@ export function SettingsPanel({
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+// ── FacebookConnectPage ──────────────────────────────────────────────────────
+
+interface FacebookConnectPageProps {
+  fb: FbSettings
+  fbDraft: FbSettings
+  setFb: (s: FbSettings) => void
+  setFbDraft: (s: FbSettings | ((prev: FbSettings) => FbSettings)) => void
+  saveFb: () => void
+}
+
+function FacebookConnectPage({ fb, fbDraft, setFb, setFbDraft, saveFb }: FacebookConnectPageProps) {
+  const [connecting, setConnecting] = useState(false)
+  const [pages, setPages]           = useState<FbPage[] | null>(null)
+  const [fbError, setFbError]       = useState<string | null>(null)
+  const [showManual, setShowManual] = useState(false)
+
+  const isConnected = Boolean(fb.accessToken && fb.pageId)
+  const loginAvailable = isFbLoginAvailable()
+
+  const handleConnect = useCallback(async () => {
+    setConnecting(true)
+    setFbError(null)
+    setPages(null)
+    try {
+      const result = await connectFacebookPages()
+      if (result.length === 1) {
+        // Single page — auto-select
+        const page = result[0]
+        const settings = { accessToken: page.accessToken, pageId: page.id }
+        setFbDraft(() => settings)
+        setFb(settings)
+        saveJsonAsync(FB_KEY, settings).catch(() => {})
+      } else {
+        // Multiple pages — show selector
+        setPages(result)
+      }
+    } catch (e) {
+      setFbError((e as Error).message)
+    } finally {
+      setConnecting(false)
+    }
+  }, [setFb, setFbDraft])
+
+  const handleSelectPage = useCallback((page: FbPage) => {
+    const settings = { accessToken: page.accessToken, pageId: page.id }
+    setFbDraft(() => settings)
+    setFb(settings)
+    saveJsonAsync(FB_KEY, settings).catch(() => {})
+    setPages(null)
+  }, [setFb, setFbDraft])
+
+  const handleDisconnect = useCallback(() => {
+    const cleared = { accessToken: '', pageId: '' }
+    localStorage.removeItem(FB_KEY)
+    setFb(cleared)
+    setFbDraft(() => cleared)
+    setPages(null)
+    setFbError(null)
+  }, [setFb, setFbDraft])
+
+  return (
+    <div className="settings-panel">
+
+      {/* Connected state */}
+      {isConnected && !pages && (
+        <div className="settings-section">
+          <div className="fb-connected-badge">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <circle cx="8" cy="8" r="7" stroke="currentColor" strokeWidth="1.3"/>
+              <path d="M5 8.2l2 2 4-4.4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+            <span>Page connected</span>
+          </div>
+          <p className="settings-hint" style={{ marginTop: 8 }}>
+            Page ID: <code>{fb.pageId}</code>
+          </p>
+          <button
+            className="settings-danger-btn"
+            onClick={handleDisconnect}
+            style={{ marginTop: 12 }}
+          >
+            Disconnect Page
+          </button>
+        </div>
+      )}
+
+      {/* Page selector (multiple pages) */}
+      {pages && pages.length > 1 && (
+        <div className="settings-section">
+          <p className="settings-label">Select a Page</p>
+          <div className="fb-page-list">
+            {pages.map(page => (
+              <button
+                key={page.id}
+                className="fb-page-item"
+                onClick={() => handleSelectPage(page)}
+              >
+                {page.picture && (
+                  <img src={page.picture} alt="" className="fb-page-item-pic" />
+                )}
+                <div className="fb-page-item-info">
+                  <span className="fb-page-item-name">{page.name}</span>
+                  <span className="fb-page-item-cat">{page.category}</span>
+                </div>
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true" className="fb-page-item-arrow">
+                  <path d="M4.5 2.5l3.5 3.5-3.5 3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Connect button */}
+      {!isConnected && !pages && (
+        <div className="settings-section">
+          {loginAvailable ? (
+            <>
+              <p className="settings-label">Connect your Facebook Page</p>
+              <p className="settings-hint" style={{ marginTop: 0, marginBottom: 12 }}>
+                Sign in with Facebook to connect a Page you manage. The app will be able to publish, edit, and delete posts on your behalf.
+              </p>
+              <button
+                className="fb-connect-btn"
+                onClick={handleConnect}
+                disabled={connecting}
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <path d="M14 8a6 6 0 1 0-6.94 5.93V9.84H5.31V8h1.75V6.66c0-1.73 1.03-2.68 2.6-2.68.75 0 1.54.14 1.54.14v1.69h-.87c-.85 0-1.12.53-1.12 1.07V8h1.9l-.3 1.84H9.21v4.09A6.003 6.003 0 0 0 14 8z" fill="currentColor"/>
+                </svg>
+                {connecting ? 'Connecting…' : 'Connect Facebook Page'}
+              </button>
+            </>
+          ) : (
+            <p className="settings-hint">
+              Facebook Login is not configured. Set <code>VITE_FB_APP_ID</code> in your environment to enable the Connect button, or use manual setup below.
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Error display */}
+      {fbError && (
+        <div className="settings-section">
+          <p className="fb-connect-error">{fbError}</p>
+        </div>
+      )}
+
+      {/* Manual fallback (collapsible) */}
+      {!isConnected && !pages && (
+        <div className="settings-section">
+          <button
+            className="fb-manual-toggle"
+            onClick={() => setShowManual(s => !s)}
+          >
+            {showManual ? 'Hide' : 'Advanced'}: Manual token setup
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true" style={{ transform: showManual ? 'rotate(180deg)' : undefined, transition: 'transform 0.2s' }}>
+              <path d="M2 3.5l3 3 3-3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          </button>
+
+          {showManual && (
+            <div className="fb-manual-section">
+              <div className="settings-section" style={{ padding: 0 }}>
+                <p className="settings-label">Access Token</p>
+                <input
+                  type="password"
+                  className="settings-form-input"
+                  placeholder="EAABwzLixnjYBO…"
+                  value={fbDraft.accessToken}
+                  onChange={e => setFbDraft(d => ({ ...d, accessToken: e.target.value }))}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+              </div>
+
+              <div className="settings-section" style={{ padding: 0, marginTop: 10 }}>
+                <p className="settings-label">Page ID</p>
+                <input
+                  type="text"
+                  className="settings-form-input"
+                  placeholder="123456789012345"
+                  value={fbDraft.pageId}
+                  onChange={e => setFbDraft(d => ({ ...d, pageId: e.target.value }))}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+              </div>
+
+              <div className="settings-section settings-section--actions" style={{ padding: 0, marginTop: 10 }}>
+                <button
+                  className="settings-save-btn"
+                  onClick={saveFb}
+                  disabled={!fbDraft.accessToken.trim() || !fbDraft.pageId.trim()}
+                >
+                  Save
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      <p className="settings-hint">
+        Your Page Access Token is stored locally on your device and encrypted at rest when a passphrase is set. It is never sent to our servers — only to Facebook's Graph API.
+      </p>
     </div>
   )
 }

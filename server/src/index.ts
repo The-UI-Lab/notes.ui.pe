@@ -374,6 +374,76 @@ const httpServer = createServer(async (req, res) => {
     return
   }
 
+  // ── Facebook: exchange short-lived token for permanent page tokens ────────
+  if (req.url === '/api/fb/exchange-token' && req.method === 'POST') {
+    const rl = checkRateLimit(`fb:${ip}`, API_RATE_LIMIT)
+    if (!rl.allowed) {
+      res.writeHead(429, { 'Retry-After': String(rl.retryAfter ?? 300) })
+      jsonResponse(res, 429, { error: 'Rate limited. Try again later.', retryAfter: rl.retryAfter })
+      return
+    }
+
+    const FB_APP_ID     = process.env.FB_APP_ID
+    const FB_APP_SECRET = process.env.FB_APP_SECRET
+
+    if (!FB_APP_ID || !FB_APP_SECRET) {
+      jsonResponse(res, 500, { error: 'Facebook app credentials not configured on server.' })
+      return
+    }
+
+    try {
+      const body = await readBody(req)
+      const { userAccessToken } = JSON.parse(body) as { userAccessToken?: string }
+      if (!userAccessToken || typeof userAccessToken !== 'string') {
+        jsonResponse(res, 400, { error: 'Missing userAccessToken' })
+        return
+      }
+
+      // 1) Exchange short-lived user token → long-lived user token
+      const exchangeUrl = `https://graph.facebook.com/v19.0/oauth/access_token?` +
+        `grant_type=fb_exchange_token&client_id=${encodeURIComponent(FB_APP_ID)}` +
+        `&client_secret=${encodeURIComponent(FB_APP_SECRET)}` +
+        `&fb_exchange_token=${encodeURIComponent(userAccessToken)}`
+
+      const exchangeRes = await fetch(exchangeUrl)
+      const exchangeJson = await exchangeRes.json() as { access_token?: string; error?: { message?: string } }
+      if (!exchangeRes.ok || !exchangeJson.access_token) {
+        jsonResponse(res, 400, { error: exchangeJson.error?.message ?? 'Failed to exchange token.' })
+        return
+      }
+      const longLivedUserToken = exchangeJson.access_token
+
+      // 2) Get user's pages with the long-lived token → page tokens are permanent
+      const pagesUrl = `https://graph.facebook.com/v19.0/me/accounts?` +
+        `fields=id,name,access_token,category,picture.width(100)` +
+        `&access_token=${encodeURIComponent(longLivedUserToken)}`
+
+      const pagesRes = await fetch(pagesUrl)
+      const pagesJson = await pagesRes.json() as {
+        data?: { id: string; name: string; access_token: string; category: string; picture?: { data?: { url?: string } } }[]
+        error?: { message?: string }
+      }
+      if (!pagesRes.ok || !pagesJson.data) {
+        jsonResponse(res, 400, { error: pagesJson.error?.message ?? 'Failed to fetch pages.' })
+        return
+      }
+
+      // Return pages (with permanent access tokens)
+      const pages = pagesJson.data.map(p => ({
+        id: p.id,
+        name: p.name,
+        accessToken: p.access_token,
+        category: p.category,
+        picture: p.picture?.data?.url ?? null,
+      }))
+
+      jsonResponse(res, 200, { pages })
+    } catch (e) {
+      jsonResponse(res, 500, { error: (e as Error).message || 'Internal error' })
+    }
+    return
+  }
+
   res.writeHead(404)
   res.end()
 })

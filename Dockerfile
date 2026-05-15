@@ -1,6 +1,9 @@
 # ── Build frontend ─────────────────────────────────────────────────────────
 FROM node:20-alpine AS build-frontend
 
+ARG VITE_FB_APP_ID
+ENV VITE_FB_APP_ID=$VITE_FB_APP_ID
+
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
