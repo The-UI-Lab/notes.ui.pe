@@ -448,11 +448,31 @@ const httpServer = createServer(async (req, res) => {
         pagesUrl = pagesJson.paging?.next
       }
 
+      // Some pages (particularly New Pages Experience pages managed through
+      // Meta Business Manager) appear in /me/accounts but without an
+      // access_token field. The user explicitly granted access in the Login
+      // dialog, so the token IS obtainable — it just isn't bundled into the
+      // /me/accounts response. Fetch it per-page for any such entry.
+      const resolved: FbPageRow[] = await Promise.all(
+        collected.map(async (p): Promise<FbPageRow> => {
+          if (p.access_token) return p
+          try {
+            const r = await fetch(
+              `https://graph.facebook.com/v19.0/${encodeURIComponent(p.id)}?` +
+              `fields=access_token&access_token=${encodeURIComponent(longLivedUserToken)}`,
+            )
+            const j = await r.json() as { access_token?: string; error?: unknown }
+            if (r.ok && j.access_token) return { ...p, access_token: j.access_token }
+          } catch { /* best-effort */ }
+          return p
+        }),
+      )
+
       // De-duplicate by id (pagination cursors can overlap) and drop any
       // rows that lack an access_token — those pages cannot be posted to
       // and would be silently unusable if forwarded to the client.
       const seen = new Set<string>()
-      const pages = collected
+      const pages = resolved
         .filter(p => {
           if (!p.access_token) return false   // no token → cannot post
           if (seen.has(p.id)) return false    // skip duplicate

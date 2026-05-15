@@ -13,11 +13,17 @@
 const FB_APP_ID = import.meta.env.VITE_FB_APP_ID as string | undefined
 const GRAPH_VERSION = 'v19.0'
 
-// Permissions needed for publishing + insights
+// Permissions needed for publishing + insights.
+//
+// `pages_manage_metadata` is required to surface pages that the user accesses
+// through Meta Business Manager (task-based / New Pages Experience pages).
+// Without it, those pages simply do not appear in /me/accounts even though
+// Facebook correctly shows them in the Login dialog's page-selector.
 const SCOPES = [
   'pages_manage_posts',
   'pages_read_engagement',
   'pages_show_list',
+  'pages_manage_metadata',
 ].join(',')
 
 // ── SDK Loader ────────────────────────────────────────────────────────────────
@@ -41,6 +47,8 @@ declare global {
       ) => void
       getLoginStatus: (
         cb: (response: { authResponse?: { accessToken: string }; status: string }) => void,
+        /** Pass `true` to bypass the SDK cache and re-check status from Facebook's servers. */
+        force?: boolean,
       ) => void
       logout: (cb?: () => void) => void
     }
@@ -119,25 +127,38 @@ export async function connectFacebookPages(): Promise<FbPage[]> {
     window.FB!.getLoginStatus(async (status) => {
       if (status.authResponse?.accessToken) {
         try {
-          // Revoke all previously granted page permissions so the next
-          // FB.login() call re-presents the full page-selector dialog.
+          // Revoke all previously granted permissions server-side. This forces
+          // Facebook to treat the next FB.login() call as a first-time grant,
+          // showing the full page-selector dialog with all pages the user manages.
           await fetch(
             `https://graph.facebook.com/v19.0/me/permissions?` +
             `access_token=${encodeURIComponent(status.authResponse.accessToken)}`,
             { method: 'DELETE' },
           )
         } catch {
-          // Best-effort — if the revocation fails we still proceed with
-          // the login; the user may see stale page data in the worst case.
+          // Best-effort — proceed regardless.
         }
+
+        // CRITICAL: After revoking permissions server-side the FB SDK still
+        // holds the old token in its local cache and considers the user
+        // "connected". If we call FB.login() now, the SDK returns that stale
+        // cached token without ever showing the dialog — the user goes through
+        // the flow but gets the same old page list.
+        //
+        // Passing `true` (force) to getLoginStatus makes the SDK re-validate
+        // against Facebook's servers. It discovers the token is now invalid,
+        // clears its local state, and sets status to "not_authorized". Only
+        // then will the subsequent FB.login() open a fresh dialog.
+        window.FB!.getLoginStatus(() => resolve(), true)
+      } else {
+        resolve()
       }
-      resolve()
     })
   })
 
-  // Fresh login — because permissions were just revoked (or there was no
-  // prior session), Facebook will show the full consent screen including
-  // the page selector, and will issue a brand-new user access token.
+  // At this point the SDK has no valid cached session. FB.login() will open
+  // the full consent dialog — including the page-selector — and return a
+  // genuinely fresh user access token covering exactly the pages selected.
   const userToken = await new Promise<string>((resolve, reject) => {
     window.FB!.login((response) => {
       if (response.authResponse?.accessToken) {
