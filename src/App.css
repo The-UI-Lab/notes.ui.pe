@@ -2341,3 +2341,274 @@
   padding-top: 12px;
   border-top: 1px solid var(--border);
 }
+
+/* ── Multi-page management ─────────────────────────────────────────────── */
+
+.fb-pages-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.fb-pages-managed-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fb-page-managed {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: var(--bg-secondary, var(--sidebar-bg));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  transition: border-color 0.12s, background 0.12s;
+}
+
+.fb-page-managed--default {
+  border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
+  background: color-mix(in srgb, var(--accent) 5%, var(--bg));
+}
+
+.fb-page-managed-radio {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.fb-radio {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 1.5px solid var(--text-faint);
+  background: var(--bg);
+  transition: border-color 0.12s, background 0.12s, box-shadow 0.12s;
+}
+
+.fb-radio--on {
+  border-color: var(--accent);
+  background: var(--accent);
+  box-shadow: inset 0 0 0 3px var(--bg);
+}
+
+.fb-page-item-pic--placeholder {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+}
+
+.fb-page-default-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-radius: 4px;
+  vertical-align: middle;
+}
+
+.fb-page-remove-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  color: var(--text-faint);
+  background: none;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: color 0.12s, background 0.12s;
+}
+
+.fb-page-remove-btn:hover {
+  color: var(--danger, #ef4444);
+  background: color-mix(in srgb, var(--danger, #ef4444) 10%, transparent);
+}
+
+.fb-add-pages-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text);
+  background: var(--bg-secondary, var(--sidebar-bg));
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+
+.fb-add-pages-btn:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--accent);
+  border-style: solid;
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg));
+}
+
+.fb-add-pages-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* ── Multi-select page picker ──────────────────────────────────────────── */
+
+.fb-page-picker-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--bg-secondary, var(--sidebar-bg));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.fb-page-picker-item:hover {
+  border-color: var(--accent);
+}
+
+.fb-page-picker-item--on {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg));
+}
+
+.fb-page-picker-check {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  flex-shrink: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+/* ── Post-to-Facebook split button ─────────────────────────────────────── */
+
+.fb-post-split {
+  display: inline-flex;
+  position: relative;
+  border-radius: var(--r-sm);
+  overflow: visible;
+}
+
+.fb-post-split .fb-post-btn--main {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.fb-post-btn--caret {
+  padding: 6px 7px;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  border-left: 1px solid color-mix(in srgb, #000 18%, var(--accent));
+  min-width: 22px;
+  justify-content: center;
+}
+
+.fb-post-split--synced .fb-post-btn--caret {
+  border-left-color: color-mix(in srgb, #000 10%, var(--item-active));
+}
+
+.fb-post-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.fb-post-menu-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 200px;
+  max-width: 280px;
+  padding: 6px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.18), 0 2px 6px rgba(0, 0, 0, 0.08);
+  z-index: 30;
+  animation: fb-post-menu-in 0.12s ease-out;
+}
+
+@keyframes fb-post-menu-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.fb-post-menu-label {
+  margin: 0 6px 4px;
+  padding: 4px 0;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.fb-post-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 8px;
+  font-size: 12.5px;
+  color: var(--text);
+  background: none;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.1s;
+}
+
+.fb-post-menu-item:hover {
+  background: var(--item-active);
+}
+
+.fb-post-menu-pic {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.fb-post-menu-pic--placeholder {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+
+.fb-post-menu-name {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

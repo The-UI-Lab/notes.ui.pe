@@ -26,20 +26,81 @@ export interface PublishMedia {
   type: 'image' | 'video'
 }
 
-const FB_KEY = 'notes-fb-v1'
+/** A single Facebook page the user has connected. */
+export interface FbConnectedPage {
+  id: string
+  name: string
+  accessToken: string
+  category: string
+  picture: string | null
+}
 
-export function loadFbSettings(): FbSettings | null {
+/** All connected Facebook pages plus which one is the default for posting. */
+export interface FbConnections {
+  v: 2
+  pages: FbConnectedPage[]
+  defaultPageId: string
+}
+
+export const FB_KEY = 'notes-fb-v1'
+
+/** Parse stored value (v1 legacy or v2) into a `FbConnections` shape. */
+export function parseFbConnections(raw: string | null | undefined): FbConnections | null {
+  if (!raw) return null
+  if (raw.startsWith('v1:')) return null // encrypted vault payload — needs async load
   try {
-    const raw = localStorage.getItem(FB_KEY)
-    if (!raw) return null
-    // Skip encrypted vault data — will be loaded async
-    if (raw.startsWith('v1:')) return null
-    const parsed = JSON.parse(raw) as Partial<FbSettings>
-    if (!parsed.accessToken || !parsed.pageId) return null
-    return { accessToken: parsed.accessToken, pageId: parsed.pageId }
+    const parsed = JSON.parse(raw) as Partial<FbConnections> & Partial<FbSettings>
+    // v2 shape
+    if (parsed.v === 2 && Array.isArray(parsed.pages) && parsed.pages.length > 0) {
+      const pages = parsed.pages.filter(p => p && p.id && p.accessToken)
+      if (!pages.length) return null
+      const defaultPageId = pages.some(p => p.id === parsed.defaultPageId)
+        ? parsed.defaultPageId!
+        : pages[0].id
+      return { v: 2, pages, defaultPageId }
+    }
+    // Legacy v1 shape — migrate to a single-page connection.
+    if (parsed.accessToken && parsed.pageId) {
+      return {
+        v: 2,
+        pages: [{
+          id: parsed.pageId,
+          name: parsed.pageId, // no name available — show ID
+          accessToken: parsed.accessToken,
+          category: '',
+          picture: null,
+        }],
+        defaultPageId: parsed.pageId,
+      }
+    }
+    return null
   } catch {
     return null
   }
+}
+
+export function loadFbConnections(): FbConnections | null {
+  return parseFbConnections(localStorage.getItem(FB_KEY))
+}
+
+/** Resolve `FbSettings` (single page) from a connections object. */
+export function getActiveSettings(
+  conn: FbConnections | null,
+  pageId?: string,
+): FbSettings | null {
+  if (!conn) return null
+  const id = pageId ?? conn.defaultPageId
+  const page = conn.pages.find(p => p.id === id) ?? conn.pages[0]
+  if (!page) return null
+  return { accessToken: page.accessToken, pageId: page.id }
+}
+
+/**
+ * Backwards-compatible: returns the *default* page's `FbSettings`, if any.
+ * Existing call sites that only care about a single connection keep working.
+ */
+export function loadFbSettings(): FbSettings | null {
+  return getActiveSettings(loadFbConnections())
 }
 
 interface GraphError {

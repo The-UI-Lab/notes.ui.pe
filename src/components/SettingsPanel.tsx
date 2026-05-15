@@ -42,6 +42,11 @@ import {
   isFbLoginAvailable,
   type FbPage,
 } from '../utils/fb-login'
+import {
+  parseFbConnections,
+  type FbConnections,
+  type FbConnectedPage,
+} from '../utils/facebook'
 
 // ── Export helper ──────────────────────────────────────────────────────────
 
@@ -70,11 +75,6 @@ function exportNotes(notes: Note[]): void {
 // ── Types ──────────────────────────────────────────────────────────────────
 
 export type Theme = 'system' | 'light' | 'dark'
-
-interface FbSettings {
-  accessToken: string
-  pageId: string
-}
 
 interface BackupMedia {
   id: string
@@ -123,7 +123,16 @@ async function saveJsonAsync(key: string, value: unknown): Promise<void> {
   await secureSet(key, JSON.stringify(value))
 }
 
-const FB_FALLBACK: FbSettings  = { accessToken: '', pageId: '' }
+/** Async-load FB connections from the vault (or plain localStorage fallback). */
+async function loadFbConnectionsAsync(): Promise<FbConnections | null> {
+  try {
+    const raw = await secureGet(FB_KEY)
+    return parseFbConnections(raw)
+  } catch {
+    return null
+  }
+}
+
 const S3_FALLBACK: S3Config    = { bucket: '', region: '', accessKeyId: '', secretAccessKey: '' }
 
 // ── Icons (inline SVGs as components for reuse) ────────────────────────────
@@ -168,8 +177,9 @@ export function SettingsPanel({
   onLockApp,
 }: Props) {
   // ── Facebook state ───────────────────────────────────────────
-  const [fb,      setFb]      = useState<FbSettings>(() => loadJsonSync(FB_KEY, FB_FALLBACK))
-  const [fbDraft, setFbDraft] = useState<FbSettings>(fb)
+  const [fbConn, setFbConn] = useState<FbConnections | null>(
+    () => parseFbConnections(localStorage.getItem(FB_KEY)),
+  )
 
   // ── S3 state ───────────────────────────────────────────────
   const [s3,      setS3]      = useState<S3Config>(() => loadJsonSync(S3_KEY, S3_FALLBACK))
@@ -181,11 +191,11 @@ export function SettingsPanel({
     let cancelled = false
     ;(async () => {
       const [fbLoaded, s3Loaded] = await Promise.all([
-        loadJsonAsync<FbSettings>(FB_KEY, FB_FALLBACK),
+        loadFbConnectionsAsync(),
         loadJsonAsync<S3Config>(S3_KEY, S3_FALLBACK),
       ])
       if (cancelled) return
-      setFb(fbLoaded); setFbDraft(fbLoaded)
+      if (fbLoaded) setFbConn(fbLoaded)
       setS3(s3Loaded); setS3Draft(s3Loaded)
     })()
     return () => { cancelled = true }
@@ -240,10 +250,14 @@ export function SettingsPanel({
 
   // ── Handlers ───────────────────────────────────────────────────────────
 
-  const saveFb = useCallback(() => {
-    saveJsonAsync(FB_KEY, fbDraft).catch(() => {})
-    setFb(fbDraft)
-  }, [fbDraft])
+  const saveFbConn = useCallback((next: FbConnections | null) => {
+    setFbConn(next)
+    if (next) {
+      saveJsonAsync(FB_KEY, next).catch(() => {})
+    } else {
+      localStorage.removeItem(FB_KEY)
+    }
+  }, [])
 
   const saveS3 = useCallback(() => {
     saveJsonAsync(S3_KEY, s3Draft).catch(() => {})
@@ -369,7 +383,7 @@ export function SettingsPanel({
         <div className="settings-nav-list">
           <button
             className="settings-nav-item"
-            onClick={() => { setFbDraft(fb); setSettingsPage('facebook') }}
+            onClick={() => setSettingsPage('facebook')}
           >            <span className="settings-nav-icon" aria-hidden="true">
               <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
                 <path d="M14 8a6 6 0 1 0-6.94 5.93V9.84H5.31V8h1.75V6.66c0-1.73 1.03-2.68 2.6-2.68.75 0 1.54.14 1.54.14v1.69h-.87c-.85 0-1.12.53-1.12 1.07V8h1.9l-.3 1.84H9.21v4.09A6.003 6.003 0 0 0 14 8z" fill="currentColor"/>
@@ -377,7 +391,11 @@ export function SettingsPanel({
             </span>
             <span className="settings-nav-label">
               Facebook Page Connector
-              {fb.pageId && <span className="settings-nav-badge">Connected</span>}
+              {fbConn && (
+                <span className="settings-nav-badge">
+                  {fbConn.pages.length === 1 ? 'Connected' : `${fbConn.pages.length} pages`}
+                </span>
+              )}
             </span>
             <span className="settings-nav-arrow"><ChevronRight /></span>
           </button>
@@ -471,11 +489,8 @@ export function SettingsPanel({
   if (settingsPage === 'facebook') {
     return (
       <FacebookConnectPage
-        fb={fb}
-        fbDraft={fbDraft}
-        setFb={setFb}
-        setFbDraft={setFbDraft}
-        saveFb={saveFb}
+        conn={fbConn}
+        onChange={saveFbConn}
       />
     )
   }
@@ -687,124 +702,278 @@ export function SettingsPanel({
 // ── FacebookConnectPage ──────────────────────────────────────────────────────
 
 interface FacebookConnectPageProps {
-  fb: FbSettings
-  fbDraft: FbSettings
-  setFb: (s: FbSettings) => void
-  setFbDraft: (s: FbSettings | ((prev: FbSettings) => FbSettings)) => void
-  saveFb: () => void
+  conn: FbConnections | null
+  onChange: (next: FbConnections | null) => void
 }
 
-function FacebookConnectPage({ fb, fbDraft, setFb, setFbDraft, saveFb }: FacebookConnectPageProps) {
+function FacebookConnectPage({ conn, onChange }: FacebookConnectPageProps) {
   const [connecting, setConnecting] = useState(false)
-  const [pages, setPages]           = useState<FbPage[] | null>(null)
+  const [picker, setPicker]         = useState<FbPage[] | null>(null)
+  const [picked, setPicked]         = useState<Set<string>>(new Set())
   const [fbError, setFbError]       = useState<string | null>(null)
   const [showManual, setShowManual] = useState(false)
+  const [manualToken, setManualToken] = useState('')
+  const [manualPageId, setManualPageId] = useState('')
 
-  const isConnected = Boolean(fb.accessToken && fb.pageId)
+  const pages = conn?.pages ?? []
+  const hasConnection = pages.length > 0
   const loginAvailable = isFbLoginAvailable()
 
+  // ── Launch FB login flow ───────────────────────────────────────────────
   const handleConnect = useCallback(async () => {
     setConnecting(true)
     setFbError(null)
-    setPages(null)
+    setPicker(null)
     try {
       const result = await connectFacebookPages()
-      if (result.length === 1) {
-        // Single page — auto-select
-        const page = result[0]
-        const settings = { accessToken: page.accessToken, pageId: page.id }
-        setFbDraft(() => settings)
-        setFb(settings)
-        saveJsonAsync(FB_KEY, settings).catch(() => {})
-      } else {
-        // Multiple pages — show selector
-        setPages(result)
-      }
+      // Show multi-select picker for every login — lets the user choose
+      // which of their pages to add (even if only one is returned).
+      setPicker(result)
+      // Pre-select pages that aren't already connected.
+      const existing = new Set(pages.map(p => p.id))
+      setPicked(new Set(result.filter(r => !existing.has(r.id)).map(r => r.id)))
     } catch (e) {
       setFbError((e as Error).message)
     } finally {
       setConnecting(false)
     }
-  }, [setFb, setFbDraft])
+  }, [pages])
 
-  const handleSelectPage = useCallback((page: FbPage) => {
-    const settings = { accessToken: page.accessToken, pageId: page.id }
-    setFbDraft(() => settings)
-    setFb(settings)
-    saveJsonAsync(FB_KEY, settings).catch(() => {})
-    setPages(null)
-  }, [setFb, setFbDraft])
+  // ── Commit picker selection: merge into stored connections ─────────────
+  const handleConfirmPicker = useCallback(() => {
+    if (!picker) return
+    const incoming: FbConnectedPage[] = picker
+      .filter(p => picked.has(p.id))
+      .map(p => ({
+        id: p.id,
+        name: p.name,
+        accessToken: p.accessToken,
+        category: p.category,
+        picture: p.picture,
+      }))
+    if (!incoming.length) { setPicker(null); return }
+    // Merge: incoming pages overwrite existing entries with the same id
+    // (so we refresh their access token).
+    const merged: FbConnectedPage[] = [
+      ...pages.filter(p => !incoming.some(i => i.id === p.id)),
+      ...incoming,
+    ]
+    const defaultPageId = conn?.defaultPageId && merged.some(p => p.id === conn.defaultPageId)
+      ? conn.defaultPageId
+      : merged[0].id
+    onChange({ v: 2, pages: merged, defaultPageId })
+    setPicker(null)
+    setPicked(new Set())
+  }, [picker, picked, pages, conn, onChange])
 
-  const handleDisconnect = useCallback(() => {
-    const cleared = { accessToken: '', pageId: '' }
-    localStorage.removeItem(FB_KEY)
-    setFb(cleared)
-    setFbDraft(() => cleared)
-    setPages(null)
+  // ── Per-page actions ───────────────────────────────────────────────────
+  const setDefault = useCallback((id: string) => {
+    if (!conn) return
+    if (conn.defaultPageId === id) return
+    onChange({ ...conn, defaultPageId: id })
+  }, [conn, onChange])
+
+  const removePage = useCallback((id: string) => {
+    if (!conn) return
+    const next = conn.pages.filter(p => p.id !== id)
+    if (next.length === 0) { onChange(null); return }
+    const defaultPageId = next.some(p => p.id === conn.defaultPageId)
+      ? conn.defaultPageId
+      : next[0].id
+    onChange({ ...conn, pages: next, defaultPageId })
+  }, [conn, onChange])
+
+  const handleDisconnectAll = useCallback(() => {
+    onChange(null)
+    setPicker(null)
     setFbError(null)
-  }, [setFb, setFbDraft])
+  }, [onChange])
+
+  // ── Manual token save (advanced fallback) ──────────────────────────────
+  const handleManualSave = useCallback(() => {
+    const token = manualToken.trim()
+    const pageId = manualPageId.trim()
+    if (!token || !pageId) return
+    const incoming: FbConnectedPage = {
+      id: pageId,
+      name: pageId,
+      accessToken: token,
+      category: '',
+      picture: null,
+    }
+    const merged = [...pages.filter(p => p.id !== pageId), incoming]
+    onChange({
+      v: 2,
+      pages: merged,
+      defaultPageId: conn?.defaultPageId ?? pageId,
+    })
+    setManualToken('')
+    setManualPageId('')
+    setShowManual(false)
+  }, [manualToken, manualPageId, pages, conn, onChange])
 
   return (
     <div className="settings-panel">
 
-      {/* Connected state */}
-      {isConnected && !pages && (
+      {/* ── Connected pages list ────────────────────────────────────── */}
+      {hasConnection && !picker && (
         <div className="settings-section">
-          <div className="fb-connected-badge">
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <circle cx="8" cy="8" r="7" stroke="currentColor" strokeWidth="1.3"/>
-              <path d="M5 8.2l2 2 4-4.4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round"/>
-            </svg>
-            <span>Page connected</span>
+          <div className="fb-pages-header">
+            <p className="settings-label" style={{ marginBottom: 0 }}>
+              Connected {pages.length === 1 ? 'Page' : 'Pages'}
+            </p>
+            <span className="settings-hint" style={{ margin: 0, fontSize: '11.5px' }}>
+              {pages.length > 1 ? 'Choose a default for posting' : ''}
+            </span>
           </div>
-          <p className="settings-hint" style={{ marginTop: 8 }}>
-            Page ID: <code>{fb.pageId}</code>
-          </p>
+          <div className="fb-pages-managed-list">
+            {pages.map(page => {
+              const isDefault = page.id === conn?.defaultPageId
+              return (
+                <div
+                  key={page.id}
+                  className={`fb-page-managed${isDefault ? ' fb-page-managed--default' : ''}`}
+                >
+                  <button
+                    type="button"
+                    className="fb-page-managed-radio"
+                    onClick={() => setDefault(page.id)}
+                    aria-label={isDefault ? 'Default page' : 'Set as default'}
+                    title={isDefault ? 'Default page' : 'Set as default'}
+                  >
+                    <span className={`fb-radio${isDefault ? ' fb-radio--on' : ''}`} aria-hidden="true" />
+                  </button>
+                  {page.picture ? (
+                    <img src={page.picture} alt="" className="fb-page-item-pic" />
+                  ) : (
+                    <div className="fb-page-item-pic fb-page-item-pic--placeholder" aria-hidden="true">
+                      <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                        <path d="M14 8a6 6 0 1 0-6.94 5.93V9.84H5.31V8h1.75V6.66c0-1.73 1.03-2.68 2.6-2.68.75 0 1.54.14 1.54.14v1.69h-.87c-.85 0-1.12.53-1.12 1.07V8h1.9l-.3 1.84H9.21v4.09A6.003 6.003 0 0 0 14 8z" fill="currentColor"/>
+                      </svg>
+                    </div>
+                  )}
+                  <div className="fb-page-item-info">
+                    <span className="fb-page-item-name">
+                      {page.name || page.id}
+                      {isDefault && <span className="fb-page-default-tag">Default</span>}
+                    </span>
+                    <span className="fb-page-item-cat">{page.category || `ID ${page.id}`}</span>
+                  </div>
+                  <button
+                    type="button"
+                    className="fb-page-remove-btn"
+                    onClick={() => removePage(page.id)}
+                    aria-label={`Remove ${page.name || page.id}`}
+                    title="Remove this page"
+                  >
+                    <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                      <path d="M2 2l10 10M12 2L2 12" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/>
+                    </svg>
+                  </button>
+                </div>
+              )
+            })}
+          </div>
+
+          {loginAvailable && (
+            <button
+              className="fb-add-pages-btn"
+              onClick={handleConnect}
+              disabled={connecting}
+              style={{ marginTop: 10 }}
+            >
+              <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                <path d="M7 2v10M2 7h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/>
+              </svg>
+              {connecting ? 'Connecting…' : 'Add more pages'}
+            </button>
+          )}
+
           <button
             className="settings-danger-btn"
-            onClick={handleDisconnect}
-            style={{ marginTop: 12 }}
+            onClick={handleDisconnectAll}
+            style={{ marginTop: 10 }}
           >
-            Disconnect Page
+            Disconnect all
           </button>
         </div>
       )}
 
-      {/* Page selector (multiple pages) */}
-      {pages && pages.length > 1 && (
+      {/* ── Multi-select picker shown after FB login ────────────────── */}
+      {picker && (
         <div className="settings-section">
-          <p className="settings-label">Select a Page</p>
+          <p className="settings-label">
+            Choose pages to {hasConnection ? 'add' : 'connect'}
+          </p>
+          <p className="settings-hint" style={{ marginTop: 0, marginBottom: 10 }}>
+            Tick the pages you want to post from. You can pick more than one and choose a default afterwards.
+          </p>
           <div className="fb-page-list">
-            {pages.map(page => (
-              <button
-                key={page.id}
-                className="fb-page-item"
-                onClick={() => handleSelectPage(page)}
-              >
-                {page.picture && (
-                  <img src={page.picture} alt="" className="fb-page-item-pic" />
-                )}
-                <div className="fb-page-item-info">
-                  <span className="fb-page-item-name">{page.name}</span>
-                  <span className="fb-page-item-cat">{page.category}</span>
-                </div>
-                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true" className="fb-page-item-arrow">
-                  <path d="M4.5 2.5l3.5 3.5-3.5 3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-                </svg>
-              </button>
-            ))}
+            {picker.map(page => {
+              const checked = picked.has(page.id)
+              const alreadyConnected = pages.some(p => p.id === page.id)
+              return (
+                <label
+                  key={page.id}
+                  className={`fb-page-picker-item${checked ? ' fb-page-picker-item--on' : ''}`}
+                >
+                  <input
+                    type="checkbox"
+                    className="fb-page-picker-check"
+                    checked={checked}
+                    onChange={e => {
+                      setPicked(prev => {
+                        const next = new Set(prev)
+                        if (e.target.checked) next.add(page.id)
+                        else next.delete(page.id)
+                        return next
+                      })
+                    }}
+                  />
+                  {page.picture && (
+                    <img src={page.picture} alt="" className="fb-page-item-pic" />
+                  )}
+                  <div className="fb-page-item-info">
+                    <span className="fb-page-item-name">
+                      {page.name}
+                      {alreadyConnected && <span className="fb-page-default-tag">Already added</span>}
+                    </span>
+                    <span className="fb-page-item-cat">{page.category}</span>
+                  </div>
+                </label>
+              )
+            })}
+          </div>
+          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            <button
+              className="modal-cancel-btn"
+              onClick={() => { setPicker(null); setPicked(new Set()) }}
+              style={{ flex: 1 }}
+            >
+              Cancel
+            </button>
+            <button
+              className="settings-save-btn"
+              onClick={handleConfirmPicker}
+              disabled={picked.size === 0}
+              style={{ flex: 1 }}
+            >
+              {picked.size > 0
+                ? `Add ${picked.size} page${picked.size === 1 ? '' : 's'}`
+                : 'Add pages'}
+            </button>
           </div>
         </div>
       )}
 
-      {/* Connect button */}
-      {!isConnected && !pages && (
+      {/* ── Connect button (no pages yet) ───────────────────────────── */}
+      {!hasConnection && !picker && (
         <div className="settings-section">
           {loginAvailable ? (
             <>
-              <p className="settings-label">Connect your Facebook Page</p>
+              <p className="settings-label">Connect your Facebook Pages</p>
               <p className="settings-hint" style={{ marginTop: 0, marginBottom: 12 }}>
-                Sign in with Facebook to connect a Page you manage. The app will be able to publish, edit, and delete posts on your behalf.
+                Sign in with Facebook to connect one or more Pages you manage. You can publish, edit, and delete posts on any connected Page.
               </p>
               <button
                 className="fb-connect-btn"
@@ -814,7 +983,7 @@ function FacebookConnectPage({ fb, fbDraft, setFb, setFbDraft, saveFb }: Faceboo
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                   <path d="M14 8a6 6 0 1 0-6.94 5.93V9.84H5.31V8h1.75V6.66c0-1.73 1.03-2.68 2.6-2.68.75 0 1.54.14 1.54.14v1.69h-.87c-.85 0-1.12.53-1.12 1.07V8h1.9l-.3 1.84H9.21v4.09A6.003 6.003 0 0 0 14 8z" fill="currentColor"/>
                 </svg>
-                {connecting ? 'Connecting…' : 'Connect Facebook Page'}
+                {connecting ? 'Connecting…' : 'Connect Facebook Pages'}
               </button>
             </>
           ) : (
@@ -825,15 +994,15 @@ function FacebookConnectPage({ fb, fbDraft, setFb, setFbDraft, saveFb }: Faceboo
         </div>
       )}
 
-      {/* Error display */}
+      {/* ── Error display ───────────────────────────────────────────── */}
       {fbError && (
         <div className="settings-section">
           <p className="fb-connect-error">{fbError}</p>
         </div>
       )}
 
-      {/* Manual fallback (collapsible) */}
-      {!isConnected && !pages && (
+      {/* ── Manual fallback ─────────────────────────────────────────── */}
+      {!picker && (
         <div className="settings-section">
           <button
             className="fb-manual-toggle"
@@ -853,8 +1022,8 @@ function FacebookConnectPage({ fb, fbDraft, setFb, setFbDraft, saveFb }: Faceboo
                   type="password"
                   className="settings-form-input"
                   placeholder="EAABwzLixnjYBO…"
-                  value={fbDraft.accessToken}
-                  onChange={e => setFbDraft(d => ({ ...d, accessToken: e.target.value }))}
+                  value={manualToken}
+                  onChange={e => setManualToken(e.target.value)}
                   autoComplete="off"
                   spellCheck={false}
                 />
@@ -866,8 +1035,8 @@ function FacebookConnectPage({ fb, fbDraft, setFb, setFbDraft, saveFb }: Faceboo
                   type="text"
                   className="settings-form-input"
                   placeholder="123456789012345"
-                  value={fbDraft.pageId}
-                  onChange={e => setFbDraft(d => ({ ...d, pageId: e.target.value }))}
+                  value={manualPageId}
+                  onChange={e => setManualPageId(e.target.value)}
                   autoComplete="off"
                   spellCheck={false}
                 />
@@ -876,10 +1045,10 @@ function FacebookConnectPage({ fb, fbDraft, setFb, setFbDraft, saveFb }: Faceboo
               <div className="settings-section settings-section--actions" style={{ padding: 0, marginTop: 10 }}>
                 <button
                   className="settings-save-btn"
-                  onClick={saveFb}
-                  disabled={!fbDraft.accessToken.trim() || !fbDraft.pageId.trim()}
+                  onClick={handleManualSave}
+                  disabled={!manualToken.trim() || !manualPageId.trim()}
                 >
-                  Save
+                  {hasConnection ? 'Add page' : 'Save'}
                 </button>
               </div>
             </div>
@@ -888,7 +1057,7 @@ function FacebookConnectPage({ fb, fbDraft, setFb, setFbDraft, saveFb }: Faceboo
       )}
 
       <p className="settings-hint">
-        Your Page Access Token is stored locally on your device and encrypted at rest when a passphrase is set. It is never sent to our servers — only to Facebook's Graph API.
+        Page Access Tokens are stored locally on your device and encrypted at rest when a passphrase is set. They are never sent to our servers — only to Facebook's Graph API.
       </p>
     </div>
   )

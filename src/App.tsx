@@ -8,11 +8,14 @@ import { MediaThumb, useMediaUrl } from './components/MediaThumb'
 import { InstallPrompt } from './components/InstallPrompt'
 import { LockScreen } from './components/LockScreen'
 import {
-  loadFbSettings,
+  loadFbConnections,
+  parseFbConnections,
+  getActiveSettings,
   publishNoteToPage,
   updatePostMessage,
   postUrl,
   type FbSettings,
+  type FbConnections,
   type PublishMedia,
 } from './utils/facebook'
 import {
@@ -108,7 +111,8 @@ export default function App() {
   const [mobileView,    setMobileView]    = useState<'list' | 'editor'>('list')
   const [sidebarView,   setSidebarView]   = useState<'notes' | 'settings' | 'facebook' | 'fb-insights'>('notes')
   const [settingsPage,  setSettingsPage]  = useState<'home' | 'facebook' | 's3' | 'sync' | 'security'>('home')
-  const [fbSettings,    setFbSettings]    = useState<FbSettings | null>(loadFbSettings)
+  const [fbConn,        setFbConn]        = useState<FbConnections | null>(loadFbConnections)
+  const fbSettings: FbSettings | null = getActiveSettings(fbConn)
   const [fbBusy,        setFbBusy]        = useState(false)
   const [fbError,       setFbError]       = useState<string | null>(null)
   const [showSaved,     setShowSaved]     = useState(false)
@@ -142,15 +146,10 @@ export default function App() {
   const reloadFbSettings = useCallback(async () => {
     try {
       const raw = await secureGet('notes-fb-v1')
-      if (!raw) { setFbSettings(loadFbSettings()); return }
-      const parsed = JSON.parse(raw) as Partial<FbSettings>
-      if (parsed.accessToken && parsed.pageId) {
-        setFbSettings({ accessToken: parsed.accessToken, pageId: parsed.pageId })
-      } else {
-        setFbSettings(null)
-      }
+      const conn = parseFbConnections(raw) ?? loadFbConnections()
+      setFbConn(conn)
     } catch {
-      setFbSettings(loadFbSettings())
+      setFbConn(loadFbConnections())
     }
   }, [])
 
@@ -304,15 +303,19 @@ export default function App() {
   )
 
   // ── Facebook publish / update ─────────────────────────────────────────────
-  const handleFbPublish = useCallback(async () => {
-    if (!fbSettings || !selectedNote) return
+  const handleFbPublish = useCallback(async (targetPageId?: string) => {
+    if (!selectedNote) return
+    const target = getActiveSettings(fbConn, targetPageId)
+    if (!target) return
     setFbBusy(true)
     setFbError(null)
     try {
       const ts = Date.now()
-      if (selectedNote.fbPost) {
+      // Update path applies only when we're posting to the same page as before
+      // (you can't "update" a post that's on a different page).
+      if (selectedNote.fbPost && selectedNote.fbPost.pageId === target.pageId) {
         // Update existing post (message only — photos can't be changed via API)
-        await updatePostMessage(fbSettings, selectedNote.fbPost.id, selectedNote.body)
+        await updatePostMessage(target, selectedNote.fbPost.id, selectedNote.body)
         const updated: FbPostInfo = {
           ...selectedNote.fbPost,
           lastSyncedAt: ts,
@@ -330,10 +333,10 @@ export default function App() {
           const blob = await getMediaBlob(m.id)
           if (blob) publishMedia.push({ blob, type: m.type })
         }
-        const { id } = await publishNoteToPage(fbSettings, selectedNote.body, publishMedia)
+        const { id } = await publishNoteToPage(target, selectedNote.body, publishMedia)
         const fbPost: FbPostInfo = {
           id,
-          pageId: fbSettings.pageId,
+          pageId: target.pageId,
           postedAt: ts,
           lastSyncedAt: ts,
           syncedBody: selectedNote.body,
@@ -347,7 +350,7 @@ export default function App() {
     } finally {
       setFbBusy(false)
     }
-  }, [fbSettings, selectedNote, setFbPost])
+  }, [fbConn, selectedNote, setFbPost])
 
   // ── Auto-resize rest textarea ─────────────────────────────────────────────
   const autoResize = useCallback(() => {
@@ -835,13 +838,20 @@ export default function App() {
                   aria-hidden="true"
                   tabIndex={-1}
                 />
-                {fbSettings && (() => {
+                {fbConn && fbSettings && (() => {
                   const fp = selectedNote.fbPost
+                  const defaultPage = fbConn.pages.find(p => p.id === fbConn.defaultPageId)
+                  // When a note is already posted, we keep updating *that* page —
+                  // so the main button targets the original page in update mode.
+                  const targetId = fp ? fp.pageId : fbConn.defaultPageId
+                  const targetPage = fbConn.pages.find(p => p.id === targetId) ?? defaultPage
                   const dirty = fp ? selectedNote.body.trim() !== fp.syncedBody.trim() : true
                   const canPost = selectedNote.body.trim().length > 0
+                  const targetName = targetPage?.name || targetPage?.id || ''
                   const label = fp
                     ? (dirty ? 'Update FB post' : 'Synced with FB')
-                    : 'Post to Facebook'
+                    : (fbConn.pages.length > 1 ? `Post to ${targetName}` : 'Post to Facebook')
+                  const otherPages = fbConn.pages.filter(p => p.id !== targetId)
                   return (
                     <>
                       {fp && (
@@ -858,21 +868,31 @@ export default function App() {
                           </svg>
                         </a>
                       )}
-                      <button
-                        className={`fb-post-btn${fp && !dirty ? ' fb-post-btn--synced' : ''}`}
-                        onClick={handleFbPublish}
-                        disabled={fbBusy || !canPost || (!!fp && !dirty)}
-                        title={label}
-                      >
-                        <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                          <path d="M14 8a6 6 0 1 0-6.94 5.93V9.84H5.31V8h1.75V6.66c0-1.73 1.03-2.68 2.6-2.68.75 0 1.54.14 1.54.14v1.69h-.87c-.85 0-1.12.53-1.12 1.07V8h1.9l-.3 1.84H9.21v4.09A6.003 6.003 0 0 0 14 8z" fill="currentColor"/>
-                        </svg>
-                        <span>
-                          {fbBusy
-                            ? (fp ? 'Updating…' : 'Posting…')
-                            : label}
-                        </span>
-                      </button>
+                      <div className={`fb-post-split${fp && !dirty ? ' fb-post-split--synced' : ''}`}>
+                        <button
+                          className="fb-post-btn fb-post-btn--main"
+                          onClick={() => handleFbPublish()}
+                          disabled={fbBusy || !canPost || (!!fp && !dirty)}
+                          title={label}
+                        >
+                          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                            <path d="M14 8a6 6 0 1 0-6.94 5.93V9.84H5.31V8h1.75V6.66c0-1.73 1.03-2.68 2.6-2.68.75 0 1.54.14 1.54.14v1.69h-.87c-.85 0-1.12.53-1.12 1.07V8h1.9l-.3 1.84H9.21v4.09A6.003 6.003 0 0 0 14 8z" fill="currentColor"/>
+                          </svg>
+                          <span>
+                            {fbBusy
+                              ? (fp ? 'Updating…' : 'Posting…')
+                              : label}
+                          </span>
+                        </button>
+                        {otherPages.length > 0 && !fbBusy && (
+                          <FbPostMenu
+                            pages={otherPages}
+                            canPost={canPost}
+                            hasExistingPost={!!fp}
+                            onPost={(pageId) => handleFbPublish(pageId)}
+                          />
+                        )}
+                      </div>
                     </>
                   )
                 })()}
@@ -986,5 +1006,76 @@ function LightboxItem({ refItem, index }: { refItem: MediaRef; index: number }) 
       className="lightbox-img"
       onClick={(e) => e.stopPropagation()}
     />
+  )
+}
+
+// ── FB post split-button menu — picks an alternate page to publish to ───────
+interface FbPostMenuProps {
+  pages: { id: string; name: string; picture: string | null; category: string }[]
+  canPost: boolean
+  hasExistingPost: boolean
+  onPost: (pageId: string) => void
+}
+
+function FbPostMenu({ pages, canPost, hasExistingPost, onPost }: FbPostMenuProps) {
+  const [open, setOpen] = useState(false)
+  const wrapRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onClick = (e: MouseEvent) => {
+      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    document.addEventListener('mousedown', onClick)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onClick)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  return (
+    <div className="fb-post-menu" ref={wrapRef}>
+      <button
+        className="fb-post-btn fb-post-btn--caret"
+        onClick={() => setOpen(o => !o)}
+        disabled={!canPost}
+        aria-label="Post to another page"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title="Post to another page"
+      >
+        <svg width="9" height="9" viewBox="0 0 10 10" fill="none" aria-hidden="true">
+          <path d="M2 3.5l3 3 3-3" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"/>
+        </svg>
+      </button>
+      {open && (
+        <div className="fb-post-menu-pop" role="menu">
+          <p className="fb-post-menu-label">
+            {hasExistingPost ? 'Also publish to' : 'Post to another page'}
+          </p>
+          {pages.map(p => (
+            <button
+              key={p.id}
+              className="fb-post-menu-item"
+              role="menuitem"
+              onClick={() => { setOpen(false); onPost(p.id) }}
+            >
+              {p.picture ? (
+                <img src={p.picture} alt="" className="fb-post-menu-pic" />
+              ) : (
+                <span className="fb-post-menu-pic fb-post-menu-pic--placeholder" aria-hidden="true">
+                  <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
+                    <path d="M14 8a6 6 0 1 0-6.94 5.93V9.84H5.31V8h1.75V6.66c0-1.73 1.03-2.68 2.6-2.68.75 0 1.54.14 1.54.14v1.69h-.87c-.85 0-1.12.53-1.12 1.07V8h1.9l-.3 1.84H9.21v4.09A6.003 6.003 0 0 0 14 8z" fill="currentColor"/>
+                  </svg>
+                </span>
+              )}
+              <span className="fb-post-menu-name">{p.name || p.id}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   )
 }
