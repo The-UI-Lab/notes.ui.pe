@@ -413,23 +413,40 @@ const httpServer = createServer(async (req, res) => {
       }
       const longLivedUserToken = exchangeJson.access_token
 
-      // 2) Get user's pages with the long-lived token → page tokens are permanent
-      const pagesUrl = `https://graph.facebook.com/v19.0/me/accounts?` +
-        `fields=id,name,access_token,category,picture.width(100)` +
-        `&access_token=${encodeURIComponent(longLivedUserToken)}`
-
-      const pagesRes = await fetch(pagesUrl)
-      const pagesJson = await pagesRes.json() as {
-        data?: { id: string; name: string; access_token: string; category: string; picture?: { data?: { url?: string } } }[]
+      // 2) Get user's pages with the long-lived token → page tokens are permanent.
+      //    Facebook paginates /me/accounts (default limit can be as low as 5), so
+      //    we follow all `next` cursors until the list is exhausted.
+      type FbAccountEntry = {
+        id: string; name: string; access_token: string;
+        category: string; picture?: { data?: { url?: string } }
+      }
+      type FbAccountsPage = {
+        data?: FbAccountEntry[]
+        paging?: { cursors?: { after?: string }; next?: string }
         error?: { message?: string }
       }
-      if (!pagesRes.ok || !pagesJson.data) {
-        jsonResponse(res, 400, { error: pagesJson.error?.message ?? 'Failed to fetch pages.' })
-        return
+
+      const allAccounts: FbAccountEntry[] = []
+      let nextUrl: string | null =
+        `https://graph.facebook.com/v19.0/me/accounts?` +
+        `fields=id,name,access_token,category,picture.width(100)` +
+        `&limit=200` +
+        `&access_token=${encodeURIComponent(longLivedUserToken)}`
+
+      while (nextUrl) {
+        const pageRes  = await fetch(nextUrl)
+        const pageJson = await pageRes.json() as FbAccountsPage
+        if (!pageRes.ok || !pageJson.data) {
+          jsonResponse(res, 400, { error: pageJson.error?.message ?? 'Failed to fetch pages.' })
+          return
+        }
+        allAccounts.push(...pageJson.data)
+        // Follow pagination cursor if present
+        nextUrl = pageJson.paging?.next ?? null
       }
 
       // Return pages (with permanent access tokens)
-      const pages = pagesJson.data.map(p => ({
+      const pages = allAccounts.map(p => ({
         id: p.id,
         name: p.name,
         accessToken: p.access_token,
