@@ -28,6 +28,8 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ['**/*.{js,css,html,svg,ico,woff,woff2}'],
+        navigateFallback: 'index.html',
+        navigateFallbackDenylist: [/^\/privacy-policy\.html$/],
       },
     }),
   ],
