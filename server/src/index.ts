@@ -383,7 +383,7 @@ const httpServer = createServer(async (req, res) => {
       return
     }
 
-    const FB_APP_ID     = process.env.FB_APP_ID
+    const FB_APP_ID     = process.env.FB_APP_ID || process.env.VITE_FB_APP_ID
     const FB_APP_SECRET = process.env.FB_APP_SECRET
 
     if (!FB_APP_ID || !FB_APP_SECRET) {
