@@ -194,11 +194,6 @@ export function useNotes() {
     const loaded = await loadNotes();
     setNotes(loaded);
     setNotesLoaded(true);
-    // Load gallery from IndexedDB
-    try {
-      const items = await getAllGalleryItems();
-      setGalleryItems(items);
-    } catch { /* best-effort */ }
     // Run legacy migration after load
     try {
       const migrated = await migrateLegacyImages();
@@ -207,6 +202,20 @@ export function useNotes() {
         setNotes(migrated);
       }
     } catch { /* migration is best-effort */ }
+  }, []);
+
+  // Load gallery separately — never blocks vault initialization.
+  // Uses a timeout so an IDB version-upgrade stall (old tab holds v1 open)
+  // cannot hang the app.
+  const loadGallery = useCallback(() => {
+    const TIMEOUT_MS = 5000;
+    const promise = getAllGalleryItems();
+    const timeout = new Promise<GalleryItem[]>((_, reject) =>
+      setTimeout(() => reject(new Error('gallery-idb-timeout')), TIMEOUT_MS)
+    );
+    Promise.race([promise, timeout])
+      .then(items => setGalleryItems(items))
+      .catch(() => { /* best-effort: gallery stays empty, user can still add */ });
   }, []);
 
   const createNote = useCallback((): Note => {
@@ -452,6 +461,7 @@ export function useNotes() {
     setSyncState,
     notesLoaded,
     loadFromVault,
+    loadGallery,
     initSync,
     stopSyncEngine,
     triggerSync,

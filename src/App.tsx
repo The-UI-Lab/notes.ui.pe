@@ -134,7 +134,7 @@ export default function App() {
     setFbPost, clearFbPost,
     galleryItems, addToGalleryItems, removeGalleryItem, useGalleryItem,
     syncState, initSync, stopSyncEngine, triggerSync, schedulePush,
-    loadFromVault,
+    loadFromVault, loadGallery,
   } = useNotes()
   const sortedNotes = [...notes].sort((a, b) => b.updatedAt - a.updatedAt)
 
@@ -211,18 +211,21 @@ export default function App() {
         if (cancelled) return
         setVaultReady(true)
         initSync()
+        // Load gallery after vault is ready — never blocks the loading screen.
+        loadGallery()
       }
     })()
     requestPersistentStorage().catch(() => {})
     return () => { cancelled = true; stopSyncEngine() }
-  }, [loadFromVault, reloadFbSettings, initSync, stopSyncEngine])
+  }, [loadFromVault, reloadFbSettings, initSync, stopSyncEngine, loadGallery])
 
   const handleVaultUnlocked = useCallback(async () => {
     setVaultLocked(false)
     await loadFromVault()
     await reloadFbSettings()
     initSync()
-  }, [loadFromVault, reloadFbSettings, initSync])
+    loadGallery()
+  }, [loadFromVault, reloadFbSettings, initSync, loadGallery])
 
   const handleLockApp = useCallback(async () => {
     const pinSet = await checkHasPin()

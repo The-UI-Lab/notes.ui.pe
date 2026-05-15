@@ -61,6 +61,12 @@ function openDb(): Promise<IDBDatabase> {
     }
     req.onsuccess = () => resolve(req.result)
     req.onerror   = () => reject(req.error ?? new Error('IndexedDB open failed'))
+    // Another tab is holding the old DB version open — reject so callers
+    // can handle the failure gracefully rather than hanging indefinitely.
+    req.onblocked = () => {
+      dbPromise = null // allow retry after the other tab closes
+      reject(new Error('IndexedDB upgrade blocked by another tab'))
+    }
   })
   return dbPromise
 }
