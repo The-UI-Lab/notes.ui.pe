@@ -448,27 +448,14 @@ const httpServer = createServer(async (req, res) => {
         pagesUrl = pagesJson.paging?.next
       }
 
-      // Also fetch via /me?fields=accounts{...} to catch New Pages Experience pages
-      // that don't appear in /me/accounts.
-      type FbMeAccountsResponse = {
-        accounts?: { data?: FbPageRow[] }
-        error?: { message?: string }
-      }
-      const meAccountsUrl =
-        `https://graph.facebook.com/v19.0/me?` +
-        `fields=accounts{id,name,access_token,category,picture.width(100)}` +
-        `&access_token=${encodeURIComponent(longLivedUserToken)}`
-      const meAccountsRes: Response = await fetch(meAccountsUrl)
-      const meAccountsJson = await meAccountsRes.json() as FbMeAccountsResponse
-      if (meAccountsRes.ok && meAccountsJson.accounts?.data) {
-        collected.push(...meAccountsJson.accounts.data)
-      }
-
-      // De-duplicate by id just in case pagination overlaps.
+      // De-duplicate by id (pagination cursors can overlap) and drop any
+      // rows that lack an access_token — those pages cannot be posted to
+      // and would be silently unusable if forwarded to the client.
       const seen = new Set<string>()
       const pages = collected
         .filter(p => {
-          if (seen.has(p.id)) return false
+          if (!p.access_token) return false   // no token → cannot post
+          if (seen.has(p.id)) return false    // skip duplicate
           seen.add(p.id)
           return true
         })

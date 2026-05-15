@@ -103,14 +103,41 @@ export async function connectFacebookPages(): Promise<FbPage[]> {
 
   await loadSdk()
 
-  // Trigger login popup.
+  // Revoke page-related permissions from any existing session before
+  // opening the login popup. This is the critical step that makes the
+  // page selector re-appear fresh every time.
   //
-  // `auth_type: 'rerequest'` forces Facebook to re-present the granular
-  // permissions dialog (including the Page selector) on every connect, even
-  // if the user previously authorized the app. Without this, FB happily
-  // returns the cached `authResponse` and silently ignores any new Pages
-  // the user tries to add — so users who selected 3 pages would only see
-  // the one originally granted.
+  // Root cause of the missing-page bug: `auth_type: 'rerequest'` only
+  // re-asks for *declined* permissions. Because `pages_show_list` was
+  // already granted (for the original set of pages), Facebook silently
+  // returns the *same cached token* — it never issues a new one that
+  // includes pages the user tries to add later. Revoking the permissions
+  // first forces Facebook to treat the next login as a first-time grant,
+  // so the full page-selector dialog is shown and a genuinely new token
+  // (covering exactly the pages selected this time) is returned.
+  await new Promise<void>((resolve) => {
+    window.FB!.getLoginStatus(async (status) => {
+      if (status.authResponse?.accessToken) {
+        try {
+          // Revoke all previously granted page permissions so the next
+          // FB.login() call re-presents the full page-selector dialog.
+          await fetch(
+            `https://graph.facebook.com/v19.0/me/permissions?` +
+            `access_token=${encodeURIComponent(status.authResponse.accessToken)}`,
+            { method: 'DELETE' },
+          )
+        } catch {
+          // Best-effort — if the revocation fails we still proceed with
+          // the login; the user may see stale page data in the worst case.
+        }
+      }
+      resolve()
+    })
+  })
+
+  // Fresh login — because permissions were just revoked (or there was no
+  // prior session), Facebook will show the full consent screen including
+  // the page selector, and will issue a brand-new user access token.
   const userToken = await new Promise<string>((resolve, reject) => {
     window.FB!.login((response) => {
       if (response.authResponse?.accessToken) {
@@ -118,7 +145,7 @@ export async function connectFacebookPages(): Promise<FbPage[]> {
       } else {
         reject(new Error('Facebook login was cancelled or failed.'))
       }
-    }, { scope: SCOPES, auth_type: 'rerequest', return_scopes: true })
+    }, { scope: SCOPES, return_scopes: true })
   })
 
   // Exchange for permanent page tokens via our server
