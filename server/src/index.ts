@@ -414,45 +414,55 @@ const httpServer = createServer(async (req, res) => {
       const longLivedUserToken = exchangeJson.access_token
 
       // 2) Get user's pages with the long-lived token → page tokens are permanent.
-      //    Facebook paginates /me/accounts (default limit can be as low as 5), so
-      //    we follow all `next` cursors until the list is exhausted.
-      type FbAccountEntry = {
-        id: string; name: string; access_token: string;
-        category: string; picture?: { data?: { url?: string } }
+      //    /me/accounts is paginated; follow `paging.next` to gather them all so
+      //    users with many Pages don't get silently truncated to the first page.
+      type FbPageRow = {
+        id: string
+        name: string
+        access_token: string
+        category: string
+        picture?: { data?: { url?: string } }
       }
-      type FbAccountsPage = {
-        data?: FbAccountEntry[]
-        paging?: { cursors?: { after?: string }; next?: string }
+      type FbPagesResponse = {
+        data?: FbPageRow[]
+        paging?: { next?: string }
         error?: { message?: string }
       }
 
-      const allAccounts: FbAccountEntry[] = []
-      let nextUrl: string | null =
+      const collected: FbPageRow[] = []
+      let pagesUrl: string | undefined =
         `https://graph.facebook.com/v19.0/me/accounts?` +
         `fields=id,name,access_token,category,picture.width(100)` +
-        `&limit=200` +
+        `&limit=100` +
         `&access_token=${encodeURIComponent(longLivedUserToken)}`
 
-      while (nextUrl) {
-        const pageRes  = await fetch(nextUrl)
-        const pageJson = await pageRes.json() as FbAccountsPage
-        if (!pageRes.ok || !pageJson.data) {
-          jsonResponse(res, 400, { error: pageJson.error?.message ?? 'Failed to fetch pages.' })
+      // Hard cap to avoid runaway loops in case Facebook ever loops paging cursors.
+      for (let i = 0; pagesUrl && i < 20; i++) {
+        const pagesRes: Response = await fetch(pagesUrl)
+        const pagesJson: FbPagesResponse = await pagesRes.json() as FbPagesResponse
+        if (!pagesRes.ok || !pagesJson.data) {
+          jsonResponse(res, 400, { error: pagesJson.error?.message ?? 'Failed to fetch pages.' })
           return
         }
-        allAccounts.push(...pageJson.data)
-        // Follow pagination cursor if present
-        nextUrl = pageJson.paging?.next ?? null
+        collected.push(...pagesJson.data)
+        pagesUrl = pagesJson.paging?.next
       }
 
-      // Return pages (with permanent access tokens)
-      const pages = allAccounts.map(p => ({
-        id: p.id,
-        name: p.name,
-        accessToken: p.access_token,
-        category: p.category,
-        picture: p.picture?.data?.url ?? null,
-      }))
+      // De-duplicate by id just in case pagination overlaps.
+      const seen = new Set<string>()
+      const pages = collected
+        .filter(p => {
+          if (seen.has(p.id)) return false
+          seen.add(p.id)
+          return true
+        })
+        .map(p => ({
+          id: p.id,
+          name: p.name,
+          accessToken: p.access_token,
+          category: p.category,
+          picture: p.picture?.data?.url ?? null,
+        }))
 
       jsonResponse(res, 200, { pages })
     } catch (e) {

@@ -31,7 +31,13 @@ declare global {
       init: (params: { appId: string; version: string; cookie?: boolean; xfbml?: boolean }) => void
       login: (
         cb: (response: { authResponse?: { accessToken: string }; status: string }) => void,
-        opts?: { scope: string; return_scopes?: boolean },
+        opts?: {
+          scope: string
+          return_scopes?: boolean
+          auth_type?: 'rerequest' | 'reauthorize' | 'reauthenticate'
+          /** Forces the granular permission / page selector dialog to re-appear. */
+          enable_profile_selector?: boolean
+        },
       ) => void
       getLoginStatus: (
         cb: (response: { authResponse?: { accessToken: string }; status: string }) => void,
@@ -97,7 +103,14 @@ export async function connectFacebookPages(): Promise<FbPage[]> {
 
   await loadSdk()
 
-  // Trigger login popup
+  // Trigger login popup.
+  //
+  // `auth_type: 'rerequest'` forces Facebook to re-present the granular
+  // permissions dialog (including the Page selector) on every connect, even
+  // if the user previously authorized the app. Without this, FB happily
+  // returns the cached `authResponse` and silently ignores any new Pages
+  // the user tries to add — so users who selected 3 pages would only see
+  // the one originally granted.
   const userToken = await new Promise<string>((resolve, reject) => {
     window.FB!.login((response) => {
       if (response.authResponse?.accessToken) {
@@ -105,7 +118,7 @@ export async function connectFacebookPages(): Promise<FbPage[]> {
       } else {
         reject(new Error('Facebook login was cancelled or failed.'))
       }
-    }, { scope: SCOPES })
+    }, { scope: SCOPES, auth_type: 'rerequest', return_scopes: true })
   })
 
   // Exchange for permanent page tokens via our server
