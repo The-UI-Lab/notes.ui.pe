@@ -91,6 +91,39 @@ function applyTheme(theme: Theme): void {
   else root.setAttribute('data-theme', theme)
 }
 
+const DAILY_PROMPTS = [
+  'What are you thinking about?',
+  'A good day to write something.',
+  'What happened today?',
+  'Something to capture before it fades.',
+  'Write it down, then let it go.',
+  'What do you want to remember?',
+  'The page is ready when you are.',
+]
+
+function getDailyPrompt(): string {
+  return DAILY_PROMPTS[new Date().getDay()] ?? DAILY_PROMPTS[0]
+}
+
+function groupNotesByDate(notes: Note[]): Array<{ label: string; notes: Note[] }> {
+  const today     = new Date().toISOString().slice(0, 10)
+  const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10)
+  const todayNotes:     Note[] = []
+  const yesterdayNotes: Note[] = []
+  const earlierNotes:   Note[] = []
+  for (const note of notes) {
+    const d = new Date(note.updatedAt).toISOString().slice(0, 10)
+    if (d === today) todayNotes.push(note)
+    else if (d === yesterday) yesterdayNotes.push(note)
+    else earlierNotes.push(note)
+  }
+  const groups: Array<{ label: string; notes: Note[] }> = []
+  if (todayNotes.length > 0)     groups.push({ label: 'Today',     notes: todayNotes })
+  if (yesterdayNotes.length > 0) groups.push({ label: 'Yesterday', notes: yesterdayNotes })
+  if (earlierNotes.length > 0)   groups.push({ label: 'Earlier',   notes: earlierNotes })
+  return groups
+}
+
 // ── Component ────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -580,12 +613,17 @@ export default function App() {
                 <path d="M6.5 7.5h7M6.5 10.5h5.5M6.5 13.5h4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
               </svg>
               <span className="sidebar-brand-name">Notes</span>
-              {streak > 1 && (
-                <span className="streak-badge" title={`${streak}-day writing streak`}>
-                  <svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true">
-                    <path d="M6 1C6 1 9.5 4 9.5 7A3.5 3.5 0 0 1 2.5 7C2.5 5.2 4 3 6 1Z" fill="currentColor"/>
-                  </svg>
-                  {streak}
+              {streak >= 1 && (
+                <span
+                  className={`streak-badge${streak === 1 ? ' streak-badge--day1' : ''}`}
+                  title={`${streak}-day writing streak`}
+                >
+                  {streak > 1 && (
+                    <svg width="10" height="10" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+                      <path d="M6 1C6 1 9.5 4 9.5 7A3.5 3.5 0 0 1 2.5 7C2.5 5.2 4 3 6 1Z" fill="currentColor"/>
+                    </svg>
+                  )}
+                  {streak === 1 ? '1 day' : streak}
                 </span>
               )}
               <button className="icon-btn" style={{ marginLeft: 'auto' }} onClick={handleNewNote} aria-label="New note" title="New note (⌘N)">
@@ -662,7 +700,7 @@ export default function App() {
                 </div>
               ) : filteredNotes.length === 0 ? (
                 <p className="notes-no-results">No notes match "{searchQuery}"</p>
-              ) : (
+              ) : searchQuery.trim() ? (
                 filteredNotes.map((note) => (
                   <button
                     key={note.id}
@@ -676,6 +714,26 @@ export default function App() {
                     </span>
                     <span className="note-item-meta">{formatDate(note.updatedAt)}</span>
                   </button>
+                ))
+              ) : (
+                groupNotesByDate(sortedNotes).map(({ label, notes: groupNotes }) => (
+                  <div key={label}>
+                    <p className="notes-group-label">{label}</p>
+                    {groupNotes.map((note) => (
+                      <button
+                        key={note.id}
+                        role="listitem"
+                        className={`note-item${selectedId === note.id ? ' note-item--active' : ''}`}
+                        onClick={() => handleSelectNote(note.id)}
+                      >
+                        <span className="note-item-title">{extractTitle(note.body)}</span>
+                        <span className="note-item-preview">
+                          {extractPreview(note.body) || <em>No content yet</em>}
+                        </span>
+                        <span className="note-item-meta">{formatDate(note.updatedAt)}</span>
+                      </button>
+                    ))}
+                  </div>
                 ))
               )}
             </div>
@@ -724,15 +782,15 @@ export default function App() {
         {!selectedNote ? (
           <div className="editor-welcome" aria-label="Welcome screen">
             <div className="editor-welcome-inner">
-              <div className="editor-welcome-icon" aria-hidden="true">
-                <svg width="44" height="44" viewBox="0 0 44 44" fill="none">
-                  <rect x="7" y="5" width="25" height="32" rx="4" stroke="currentColor" strokeWidth="1.8" fill="none" opacity="0.2"/>
-                  <path d="M14 17h16M14 22h12M14 27h8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" opacity="0.35"/>
-                  <path d="M30 26l7-7-3.5-3.5-7 7v3.5H30z" fill="currentColor" opacity="0.6"/>
+              <p className="editor-welcome-day">{new Date().toLocaleDateString('en', { weekday: 'long' })}</p>
+              <h2 className="editor-welcome-date">{new Date().toLocaleDateString('en', { month: 'long', day: 'numeric' })}</h2>
+              <p className="editor-welcome-prompt">{getDailyPrompt()}</p>
+              <button className="editor-welcome-cta" onClick={handleNewNote}>
+                <svg width="12" height="12" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                  <path d="M7 1v12M1 7h12" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
                 </svg>
-              </div>
-              <h2>Nothing open yet</h2>
-              <p>Select a note or tap the pen to start.</p>
+                New note
+              </button>
             </div>
           </div>
         ) : (

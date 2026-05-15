@@ -10,7 +10,7 @@
 /* ── Sidebar ───────────────────────────────────────────────────────────────── */
 
 .sidebar {
-  width: 272px;
+  width: 248px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -87,14 +87,35 @@
   line-height: 1;
 }
 
+.streak-badge--day1 {
+  background: transparent;
+  padding: 0;
+  font-weight: 500;
+  font-style: italic;
+  opacity: 0.8;
+}
+
 /* Notes list */
 
 .notes-list {
   flex: 1;
   overflow-y: auto;
-  padding: 6px 0;
+  padding: 4px 0;
   scrollbar-width: thin;
   scrollbar-color: var(--border) transparent;
+}
+
+/* Date group headers (Today / Yesterday / Earlier) */
+
+.notes-group-label {
+  padding: 10px 14px 3px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  pointer-events: none;
+  user-select: none;
 }
 
 /* Search bar — collapses to zero height by default, expands smoothly */
@@ -222,9 +243,9 @@
 .note-item {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 2px;
   width: 100%;
-  padding: 11px 18px;
+  padding: 8px 14px;
   text-align: left;
   background: transparent;
   border: none;
@@ -241,7 +262,7 @@
 }
 
 .note-item-title {
-  font-size: 13.5px;
+  font-size: 13px;
   font-weight: 600;
   color: var(--text);
   letter-spacing: -0.015em;
@@ -255,7 +276,7 @@
 }
 
 .note-item-preview {
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--text-muted);
   white-space: nowrap;
   overflow: hidden;
@@ -264,9 +285,9 @@
 }
 
 .note-item-meta {
-  font-size: 11px;
+  font-size: 10.5px;
   color: var(--text-faint);
-  margin-top: 1px;
+  margin-top: 0;
 }
 
 /* Sidebar footer */
@@ -315,29 +336,52 @@
 
 .editor-welcome-inner {
   text-align: center;
-  max-width: 300px;
+  max-width: 320px;
 }
 
-.editor-welcome-icon {
-  display: flex;
-  justify-content: center;
-  margin-bottom: 20px;
-  color: var(--text-faint);
-}
-
-.editor-welcome-inner h2 {
-  font-size: 21px;
+.editor-welcome-day {
+  font-size: 11px;
   font-weight: 700;
-  color: var(--text);
-  letter-spacing: -0.04em;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--accent);
   margin-bottom: 8px;
 }
 
-.editor-welcome-inner p {
-  font-size: 14px;
+.editor-welcome-date {
+  font-size: 36px;
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  color: var(--text);
+  line-height: 1.1;
+  margin-bottom: 14px;
+}
+
+.editor-welcome-prompt {
+  font-size: 15px;
   color: var(--text-muted);
   line-height: 1.6;
-  margin-bottom: 24px;
+  margin-bottom: 28px;
+  font-family: var(--font-writing);
+  font-style: italic;
+}
+
+.editor-welcome-cta {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 22px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--accent-text);
+  background: var(--accent);
+  border: none;
+  border-radius: var(--r-sm);
+  transition: background var(--ease);
+}
+
+.editor-welcome-cta:hover {
+  background: var(--accent-hover);
 }
 
 /* Editor */
@@ -363,7 +407,7 @@
 .editor-scroll {
   flex: 1;
   overflow-y: auto;
-  padding: 32px 48px 48px;
+  padding: 28px 40px 40px;
   scrollbar-width: thin;
   scrollbar-color: var(--border) transparent;
 }
@@ -383,7 +427,7 @@
   line-height: 1.18;
   font-family: var(--font-ui);
   padding: 0;
-  margin-bottom: 18px;
+  margin-bottom: 14px;
 }
 
 .editor-title-line::placeholder {
@@ -422,9 +466,9 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 48px;
+  padding: 8px 40px;
   border-top: 1px solid var(--border);
-  min-height: 44px;
+  min-height: 40px;
 }
 
 .editor-stats {
@@ -816,15 +860,15 @@
 
 @media (min-width: 681px) and (max-width: 900px) {
   .sidebar {
-    width: 220px;
+    width: 200px;
   }
 
   .editor-scroll {
-    padding: 28px 32px 40px;
+    padding: 24px 28px 36px;
   }
 
   .editor-footer {
-    padding: 10px 32px;
+    padding: 8px 28px;
   }
 }
 
