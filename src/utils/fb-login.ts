@@ -15,15 +15,22 @@ const GRAPH_VERSION = 'v19.0'
 
 // Permissions needed for publishing + insights.
 //
-// `pages_manage_metadata` is required to surface pages that the user accesses
-// through Meta Business Manager (task-based / New Pages Experience pages).
-// Without it, those pages simply do not appear in /me/accounts even though
-// Facebook correctly shows them in the Login dialog's page-selector.
+// `pages_manage_metadata` is required to surface New Pages Experience pages.
+//
+// `business_management` is required to enumerate pages that are owned by a
+// Meta Business Manager account. These pages do NOT appear in /me/accounts at
+// all — /me/accounts only returns pages where the user has a *direct* page
+// role. Pages accessed via Business Manager task-based assignments live under
+// /{business_id}/owned_pages and /{business_id}/client_pages, which require
+// this permission. Without it, any page whose ownership is managed by a
+// Business (rather than the individual user) will be silently absent from the
+// connection flow, even when the user selects it in the Login dialog.
 const SCOPES = [
   'pages_manage_posts',
   'pages_read_engagement',
   'pages_show_list',
   'pages_manage_metadata',
+  'business_management',
 ].join(',')
 
 // ── SDK Loader ────────────────────────────────────────────────────────────────

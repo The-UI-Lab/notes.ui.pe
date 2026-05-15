@@ -448,6 +448,66 @@ const httpServer = createServer(async (req, res) => {
         pagesUrl = pagesJson.paging?.next
       }
 
+      // 3) Also enumerate pages accessible through Meta Business Manager.
+      //
+      //    Root cause of the "missing page" bug:
+      //    /me/accounts ONLY returns pages where the user has a *direct*
+      //    page-level role (admin, editor, etc. assigned at the Page itself).
+      //    Pages whose ownership is managed by a Meta Business Manager account
+      //    (task-based / business-scoped access) are NEVER returned by
+      //    /me/accounts — they simply do not appear there, even when the user
+      //    explicitly selects them in the Facebook Login dialog.
+      //
+      //    The correct path for those pages is:
+      //      GET /me/businesses → get all Business Manager IDs
+      //      GET /{business_id}/owned_pages  → pages the business owns
+      //      GET /{business_id}/client_pages → pages the business manages for clients
+      //
+      //    Requires the `business_management` permission (needs App Review for
+      //    live apps; works for test users in development). Wrapped in a
+      //    try/catch so the flow degrades gracefully when the permission is
+      //    unavailable — pages from /me/accounts are still returned normally.
+      try {
+        type FbBusiness = { id: string }
+        type FbBusinessesResponse = {
+          data?: FbBusiness[]
+          paging?: { next?: string }
+        }
+
+        const businesses: FbBusiness[] = []
+        let bizUrl: string | undefined =
+          `https://graph.facebook.com/v19.0/me/businesses?` +
+          `fields=id&limit=100` +
+          `&access_token=${encodeURIComponent(longLivedUserToken)}`
+
+        for (let i = 0; bizUrl && i < 10; i++) {
+          const bizRes = await fetch(bizUrl)
+          if (!bizRes.ok) break
+          const bizJson = await bizRes.json() as FbBusinessesResponse
+          if (!bizJson.data) break
+          businesses.push(...bizJson.data)
+          bizUrl = bizJson.paging?.next
+        }
+
+        for (const biz of businesses) {
+          for (const edge of ['owned_pages', 'client_pages'] as const) {
+            let bizPageUrl: string | undefined =
+              `https://graph.facebook.com/v19.0/${encodeURIComponent(biz.id)}/${edge}?` +
+              `fields=id,name,access_token,category,picture.width(100)&limit=100` +
+              `&access_token=${encodeURIComponent(longLivedUserToken)}`
+
+            for (let i = 0; bizPageUrl && i < 20; i++) {
+              const bizPageRes = await fetch(bizPageUrl)
+              if (!bizPageRes.ok) break
+              const bizPageJson = await bizPageRes.json() as FbPagesResponse
+              if (!bizPageJson.data) break
+              collected.push(...bizPageJson.data)
+              bizPageUrl = bizPageJson.paging?.next
+            }
+          }
+        }
+      } catch { /* best-effort — proceed with /me/accounts results only */ }
+
       // Some pages (particularly New Pages Experience pages managed through
       // Meta Business Manager) appear in /me/accounts but without an
       // access_token field. The user explicitly granted access in the Login
