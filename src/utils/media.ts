@@ -38,9 +38,10 @@ export interface MediaRef {
   durationMs?: number
 }
 
-const DB_NAME    = 'notes-media'
-const DB_VERSION = 1
-const STORE      = 'media'
+const DB_NAME       = 'notes-media'
+const DB_VERSION    = 2
+const STORE         = 'media'
+const GALLERY_STORE = 'gallery'
 
 let dbPromise: Promise<IDBDatabase> | null = null
 
@@ -48,10 +49,14 @@ function openDb(): Promise<IDBDatabase> {
   if (dbPromise) return dbPromise
   dbPromise = new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION)
-    req.onupgradeneeded = () => {
+    req.onupgradeneeded = (event) => {
       const db = req.result
-      if (!db.objectStoreNames.contains(STORE)) {
+      const oldVersion = (event as IDBVersionChangeEvent).oldVersion
+      if (oldVersion < 1) {
         db.createObjectStore(STORE, { keyPath: 'id' })
+      }
+      if (oldVersion < 2) {
+        db.createObjectStore(GALLERY_STORE, { keyPath: 'id' })
       }
     }
     req.onsuccess = () => resolve(req.result)
@@ -62,6 +67,10 @@ function openDb(): Promise<IDBDatabase> {
 
 function tx(mode: IDBTransactionMode): Promise<IDBObjectStore> {
   return openDb().then(db => db.transaction(STORE, mode).objectStore(STORE))
+}
+
+function galleryTx(mode: IDBTransactionMode): Promise<IDBObjectStore> {
+  return openDb().then(db => db.transaction(GALLERY_STORE, mode).objectStore(GALLERY_STORE))
 }
 
 function reqAsPromise<T>(req: IDBRequest<T>): Promise<T> {
@@ -109,6 +118,34 @@ export async function clearAllMedia(): Promise<void> {
   await reqAsPromise(store.clear())
   for (const { url } of urlCache.values()) URL.revokeObjectURL(url)
   urlCache.clear()
+}
+
+// ── Gallery store (manifest of unattached media items) ────────────────────────
+
+import type { GalleryItem } from '../types'
+
+/** Add a media record to the gallery manifest (blob already in media store). */
+export async function addToGallery(item: GalleryItem): Promise<void> {
+  const store = await galleryTx('readwrite')
+  await reqAsPromise(store.put(item))
+}
+
+/** Remove an item from the gallery manifest (does NOT delete the blob). */
+export async function removeFromGallery(id: string): Promise<void> {
+  const store = await galleryTx('readwrite')
+  await reqAsPromise(store.delete(id))
+}
+
+/** Return all items currently in the gallery manifest. */
+export async function getAllGalleryItems(): Promise<GalleryItem[]> {
+  const store = await galleryTx('readonly')
+  return reqAsPromise(store.getAll() as IDBRequest<GalleryItem[]>)
+}
+
+/** Fully delete a gallery item — removes from gallery manifest AND media store. */
+export async function deleteGalleryItem(id: string): Promise<void> {
+  await removeFromGallery(id)
+  await deleteMedia(id)
 }
 
 // ── Object URL cache ─────────────────────────────────────────────────────────

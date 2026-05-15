@@ -25,9 +25,11 @@ import {
   getMediaBlob,
   blobToBase64,
   base64ToBlob,
+  addToGallery,
+  removeFromGallery,
   type MediaRecord,
 } from './media'
-import type { Note } from '../types'
+import type { Note, GalleryItem } from '../types'
 import { secureGet, secureSet } from './vault'
 
 // ── Config / persistence keys ──────────────────────────────────────────────
@@ -72,6 +74,10 @@ export interface SyncCallbacks {
   onNoteDeleted: (noteId: string) => void
   onStatusChange: (state: SyncState) => void
   onTransferRequest?: (request: { transferId: number; requesterName: string }) => void
+  // Gallery callbacks (optional — only wired when gallery feature is mounted)
+  getGalleryItems?: () => GalleryItem[]
+  onGalleryItemAdded?: (item: GalleryItem) => void
+  onGalleryItemRemoved?: (id: string) => void
 }
 
 // ── Operation types (encrypted payloads contain these) ────────────────────
@@ -90,7 +96,21 @@ interface OpNoteDelete {
   deletedAt: number
 }
 
-type SyncOp = OpNoteUpdate | OpNoteDelete
+interface OpGalleryAdd {
+  type: 'gallery-add'
+  id: string
+  item: GalleryItem
+  mediaData: { id: string; mime: string; data: string } | null
+  createdAt: number
+}
+
+interface OpGalleryRemove {
+  type: 'gallery-remove'
+  id: string
+  removedAt: number
+}
+
+type SyncOp = OpNoteUpdate | OpNoteDelete | OpGalleryAdd | OpGalleryRemove
 
 // ── Device ID management ─────────────────────────────────────────────────
 
@@ -427,6 +447,7 @@ async function handleServerMessage(msg: Record<string, unknown>): Promise<void> 
         // Existing device — flush queue and push changes
         await flushQueue()
         await pushAllNotes()
+        await pushAllGalleryItems()
       }
       break
     }
@@ -634,6 +655,36 @@ async function applyRemoteOp(payloadB64: string, syncCode: string): Promise<void
         callbacks?.onNoteDeleted(op.noteId)
         break
       }
+      case 'gallery-add': {
+        // Restore blob if included
+        if (op.mediaData) {
+          const existing = await getMedia(op.id)
+          if (!existing) {
+            const blob = base64ToBlob(op.mediaData.data, op.mediaData.mime)
+            const rec: MediaRecord = {
+              id: op.id,
+              type: op.item.type,
+              mime: op.mediaData.mime,
+              blob,
+              size: blob.size,
+              width: op.item.width,
+              height: op.item.height,
+              durationMs: op.item.durationMs,
+              createdAt: op.item.createdAt,
+            }
+            await putMedia(rec)
+          }
+        }
+        // Add to gallery manifest
+        await addToGallery(op.item)
+        callbacks?.onGalleryItemAdded?.(op.item)
+        break
+      }
+      case 'gallery-remove': {
+        await removeFromGallery(op.id)
+        callbacks?.onGalleryItemRemoved?.(op.id)
+        break
+      }
     }
   } catch (e) {
     console.warn('[sync] Failed to apply remote op:', e)
@@ -697,6 +748,14 @@ async function pushAllNotes(): Promise<void> {
   const notes = callbacks.getNotes()
   for (const note of notes) {
     await pushNoteUpdate(note)
+  }
+}
+
+async function pushAllGalleryItems(): Promise<void> {
+  if (!callbacks?.getGalleryItems) return
+  const items = callbacks.getGalleryItems()
+  for (const item of items) {
+    await syncPushGalleryAdd(item)
   }
 }
 
@@ -864,6 +923,7 @@ export async function triggerSync(): Promise<void> {
     // Request ops since our cursor
     ws.send(JSON.stringify({ type: 'pull', since: getCursor() }))
     await pushAllNotes()
+    await pushAllGalleryItems()
   } else {
     await connect()
   }
@@ -882,4 +942,35 @@ export async function denyTransfer(transferId: number): Promise<void> {
   if (ws?.readyState !== WebSocket.OPEN) return
   ws.send(JSON.stringify({ type: 'deny-transfer', transferId }))
   updateState({ pendingTransfer: undefined })
+}
+
+// ── Gallery sync ──────────────────────────────────────────────────────────
+
+/** Push a gallery-add op when the user adds a photo/video to the gallery. */
+export async function syncPushGalleryAdd(item: GalleryItem): Promise<void> {
+  if (!isSyncEnabled()) return
+  const blob = await getMediaBlob(item.id)
+  let mediaData: OpGalleryAdd['mediaData'] = null
+  if (blob && blob.size <= 512 * 1024) {
+    mediaData = { id: item.id, mime: item.mime, data: await blobToBase64(blob) }
+  }
+  const op: OpGalleryAdd = {
+    type: 'gallery-add',
+    id: item.id,
+    item,
+    mediaData,
+    createdAt: item.createdAt,
+  }
+  await pushOp(op)
+}
+
+/** Push a gallery-remove op when a gallery item is used in a note or deleted. */
+export async function syncPushGalleryRemove(id: string): Promise<void> {
+  if (!isSyncEnabled()) return
+  const op: OpGalleryRemove = {
+    type: 'gallery-remove',
+    id,
+    removedAt: Date.now(),
+  }
+  await pushOp(op)
 }

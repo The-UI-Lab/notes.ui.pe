@@ -16,6 +16,17 @@ export interface FbPostInfo {
 
 export type MediaType = 'image' | 'video';
 
+export interface GalleryItem {
+  id: string;
+  type: MediaType;
+  mime: string;
+  size: number;
+  width?: number;
+  height?: number;
+  durationMs?: number;
+  createdAt: number;
+}
+
 export interface MediaRef {
   id: string;
   type: MediaType;

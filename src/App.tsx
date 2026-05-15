@@ -7,6 +7,7 @@ import { FacebookInsights } from './components/FacebookInsights'
 import { MediaThumb, useMediaUrl } from './components/MediaThumb'
 import { InstallPrompt } from './components/InstallPrompt'
 import { LockScreen } from './components/LockScreen'
+import { PhotoGallery } from './components/PhotoGallery'
 import {
   loadFbConnections,
   parseFbConnections,
@@ -131,6 +132,7 @@ export default function App() {
     notes, createNote, updateNote, deleteNote,
     addMedia, removeMedia, restoreNotes,
     setFbPost, clearFbPost,
+    galleryItems, addToGalleryItems, removeGalleryItem, useGalleryItem,
     syncState, initSync, stopSyncEngine, triggerSync, schedulePush,
     loadFromVault,
   } = useNotes()
@@ -142,7 +144,7 @@ export default function App() {
 
   const [selectedId,    setSelectedId]    = useState<string | null>(() => sortedNotes[0]?.id ?? null)
   const [mobileView,    setMobileView]    = useState<'list' | 'editor'>('list')
-  const [sidebarView,   setSidebarView]   = useState<'notes' | 'settings' | 'facebook' | 'fb-insights'>('notes')
+  const [sidebarView,   setSidebarView]   = useState<'notes' | 'settings' | 'facebook' | 'fb-insights' | 'gallery'>('notes')
   const [settingsPage,  setSettingsPage]  = useState<'home' | 'facebook' | 's3' | 'sync' | 'security'>('home')
   const [fbConn,        setFbConn]        = useState<FbConnections | null>(loadFbConnections)
   const fbSettings: FbSettings | null = getActiveSettings(fbConn)
@@ -531,6 +533,9 @@ export default function App() {
 
   // ── Render ────────────────────────────────────────────────────────────────
 
+  // Precompute to avoid TypeScript narrowing the state in nested ternary branches
+  const isGalleryView = sidebarView === 'gallery'
+
   // Vault loading
   if (!vaultReady) {
     return (
@@ -606,6 +611,22 @@ export default function App() {
               </button>
               <span className="sidebar-brand-name">Insights</span>
             </>
+          ) : sidebarView === 'gallery' ? (
+            <>
+              <button
+                className="icon-btn"
+                onClick={() => setSidebarView('notes')}
+                aria-label="Back to notes"
+              >
+                <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                  <path d="M11 4l-5 5 5 5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+              </button>
+              <span className="sidebar-brand-name">Gallery</span>
+              {galleryItems.length > 0 && (
+                <span className="gallery-count-badge">{galleryItems.length}</span>
+              )}
+            </>
           ) : (
             <>
               <svg className="sidebar-brand-icon" width="20" height="20" viewBox="0 0 20 20" fill="none" aria-hidden="true">
@@ -666,6 +687,19 @@ export default function App() {
             notes={notes}
             fb={fbSettings}
             onBack={() => setSidebarView('facebook')}
+          />
+        ) : sidebarView === 'gallery' ? (
+          <PhotoGallery
+            items={galleryItems}
+            onAdd={(records) => addToGalleryItems(records).then(() => {})}
+            onRemove={removeGalleryItem}
+            onUse={(item) => {
+              if (selectedNote) {
+                useGalleryItem(item, selectedNote.id)
+              }
+            }}
+            hasActiveNote={!!selectedNote}
+            syncEnabled={syncState.enabled}
           />
         ) : (
           <>
@@ -753,6 +787,29 @@ export default function App() {
                   <circle cx="7" cy="7" r="5" stroke="currentColor" strokeWidth="1.5"/>
                   <path d="M11 11l3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
                 </svg>
+              </button>
+              <button
+                className={`icon-btn${isGalleryView ? ' icon-btn--active' : ''}`}
+                onClick={() => setSidebarView(isGalleryView ? 'notes' : 'gallery')}
+                aria-label="Photo gallery"
+                title="Gallery"
+              >
+                {galleryItems.length > 0 ? (
+                  <span className="gallery-footer-badge" aria-label={`${galleryItems.length} items in gallery`}>
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                      <rect x="1.5" y="3" width="13" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.4"/>
+                      <circle cx="5.5" cy="7" r="1.3" fill="currentColor"/>
+                      <path d="M1.5 12l4-4 3 3 2-2 4 4" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"/>
+                    </svg>
+                    <span className="gallery-footer-count">{galleryItems.length}</span>
+                  </span>
+                ) : (
+                  <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <rect x="1.5" y="3" width="13" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.4"/>
+                    <circle cx="5.5" cy="7" r="1.3" fill="currentColor"/>
+                    <path d="M1.5 12l4-4 3 3 2-2 4 4" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"/>
+                  </svg>
+                )}
               </button>
               {fbSettings && (
                 <button
@@ -886,6 +943,21 @@ export default function App() {
                     <path d="M1.5 12l4-4 3 3 2-2 4 4" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"/>
                   </svg>
                 </button>
+                {galleryItems.length > 0 && (
+                  <button
+                    className={`icon-btn gallery-pick-btn${isGalleryView ? ' icon-btn--active' : ''}`}
+                    onClick={() => setSidebarView(isGalleryView ? 'notes' : 'gallery')}
+                    aria-label={`Pick from gallery (${galleryItems.length} item${galleryItems.length === 1 ? '' : 's'})`}
+                    title={`From gallery (${galleryItems.length})`}
+                  >
+                    <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden="true">
+                      <rect x="1" y="2" width="12" height="10" rx="1.5" stroke="currentColor" strokeWidth="1.3"/>
+                      <circle cx="4.5" cy="6" r="1.2" fill="currentColor"/>
+                      <path d="M1 10.5l3.5-3.5 2.5 2.5 1.5-1.5 3.5 3.5" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round"/>
+                    </svg>
+                    <span className="gallery-pick-count">{galleryItems.length}</span>
+                  </button>
+                )}
                 <input
                   ref={mediaInputRef}
                   type="file"

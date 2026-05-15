@@ -1,15 +1,21 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import type { Note, FbPostInfo, MediaRef } from '../types';
+import type { Note, FbPostInfo, MediaRef, GalleryItem } from '../types';
 import {
   putMedia,
   deleteMedia,
   base64ToBlob,
+  addToGallery,
+  removeFromGallery,
+  getAllGalleryItems,
+  deleteGalleryItem,
   type MediaRecord,
 } from '../utils/media';
 import {
   isSyncEnabled,
   syncPushSingle,
   syncDeleteNote,
+  syncPushGalleryAdd,
+  syncPushGalleryRemove,
   startSync,
   stopSync,
   triggerSync as syncTrigger,
@@ -160,6 +166,7 @@ async function migrateLegacyImages(): Promise<Note[] | null> {
 export function useNotes() {
   const [notes, setNotes] = useState<Note[]>([]);
   const [notesLoaded, setNotesLoaded] = useState(false);
+  const [galleryItems, setGalleryItems] = useState<GalleryItem[]>([]);
   const [syncState, setSyncState] = useState<SyncState>({
     enabled: isSyncEnabled(),
     status: isSyncEnabled() ? 'idle' : 'disabled',
@@ -169,6 +176,8 @@ export function useNotes() {
   });
   const notesRef = useRef(notes);
   notesRef.current = notes;
+  const galleryRef = useRef(galleryItems);
+  galleryRef.current = galleryItems;
   const pushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Debounced push: waits 1.5s after last change before syncing via WebSocket
@@ -185,6 +194,11 @@ export function useNotes() {
     const loaded = await loadNotes();
     setNotes(loaded);
     setNotesLoaded(true);
+    // Load gallery from IndexedDB
+    try {
+      const items = await getAllGalleryItems();
+      setGalleryItems(items);
+    } catch { /* best-effort */ }
     // Run legacy migration after load
     try {
       const migrated = await migrateLegacyImages();
@@ -264,6 +278,72 @@ export function useNotes() {
     });
   }, []);
 
+  /** Add one or more files to the gallery. */
+  const addToGalleryItems = useCallback(async (records: MediaRecord[]): Promise<GalleryItem[]> => {
+    const newItems: GalleryItem[] = [];
+    for (const rec of records) {
+      await putMedia(rec);
+      const item: GalleryItem = {
+        id: rec.id,
+        type: rec.type,
+        mime: rec.mime,
+        size: rec.size,
+        width: rec.width,
+        height: rec.height,
+        durationMs: rec.durationMs,
+        createdAt: rec.createdAt,
+      };
+      await addToGallery(item);
+      syncPushGalleryAdd(item).catch(() => {});
+      newItems.push(item);
+    }
+    setGalleryItems(prev => [...prev, ...newItems]);
+    return newItems;
+  }, []);
+
+  /** Remove an item from the gallery (deletes blob + manifest entry). */
+  const removeGalleryItem = useCallback(async (id: string) => {
+    await deleteGalleryItem(id);
+    syncPushGalleryRemove(id).catch(() => {});
+    setGalleryItems(prev => prev.filter(i => i.id !== id));
+  }, []);
+
+  /**
+   * Move a gallery item into a note: adds it to the note's media array and
+   * removes it from the gallery manifest (blob stays in the media store).
+   */
+  const useGalleryItem = useCallback((item: GalleryItem, noteId: string) => {
+    // Add to note
+    const ref: MediaRef = {
+      id: item.id,
+      type: item.type,
+      mime: item.mime,
+      size: item.size,
+      width: item.width,
+      height: item.height,
+      durationMs: item.durationMs,
+    };
+    setNotes(prev => {
+      const next = prev.map(n =>
+        n.id === noteId
+          ? { ...n, media: [...n.media, ref], updatedAt: Date.now() }
+          : n
+      );
+      persist(next);
+      return next;
+    });
+    // Remove from gallery (manifest only — blob stays)
+    removeFromGallery(item.id).catch(() => {});
+    syncPushGalleryRemove(item.id).catch(() => {});
+    setGalleryItems(prev => prev.filter(i => i.id !== item.id));
+    // Schedule sync push of the updated note
+    setNotes(prev => {
+      const note = prev.find(n => n.id === noteId);
+      if (note) syncPushSingle(note).catch(() => {});
+      return prev;
+    });
+  }, []);
+
   const restoreNotes = useCallback((restoredNotes: Note[]) => {
     persist(restoredNotes);
     setNotes(restoredNotes);
@@ -323,6 +403,20 @@ export function useNotes() {
         });
       },
       onStatusChange: setSyncState,
+      // Gallery callbacks
+      getGalleryItems: () => galleryRef.current,
+      onGalleryItemAdded: (item) => {
+        // Store blob is already handled in applyRemoteOp; just update UI state
+        addToGallery(item).catch(() => {});
+        setGalleryItems(prev => {
+          if (prev.find(i => i.id === item.id)) return prev;
+          return [...prev, item];
+        });
+      },
+      onGalleryItemRemoved: (id) => {
+        removeFromGallery(id).catch(() => {});
+        setGalleryItems(prev => prev.filter(i => i.id !== id));
+      },
     };
     startSync(cbs);
   }, []);
@@ -350,6 +444,10 @@ export function useNotes() {
     restoreNotes,
     setFbPost,
     clearFbPost,
+    galleryItems,
+    addToGalleryItems,
+    removeGalleryItem,
+    useGalleryItem,
     syncState,
     setSyncState,
     notesLoaded,
