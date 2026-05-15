@@ -448,6 +448,22 @@ const httpServer = createServer(async (req, res) => {
         pagesUrl = pagesJson.paging?.next
       }
 
+      // Also fetch via /me?fields=accounts{...} to catch New Pages Experience pages
+      // that don't appear in /me/accounts.
+      type FbMeAccountsResponse = {
+        accounts?: { data?: FbPageRow[] }
+        error?: { message?: string }
+      }
+      const meAccountsUrl =
+        `https://graph.facebook.com/v19.0/me?` +
+        `fields=accounts{id,name,access_token,category,picture.width(100)}` +
+        `&access_token=${encodeURIComponent(longLivedUserToken)}`
+      const meAccountsRes: Response = await fetch(meAccountsUrl)
+      const meAccountsJson = await meAccountsRes.json() as FbMeAccountsResponse
+      if (meAccountsRes.ok && meAccountsJson.accounts?.data) {
+        collected.push(...meAccountsJson.accounts.data)
+      }
+
       // De-duplicate by id just in case pagination overlaps.
       const seen = new Set<string>()
       const pages = collected
