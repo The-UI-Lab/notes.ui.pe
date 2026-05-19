@@ -28,6 +28,9 @@ import {
   validateSyncCode,
   approveTransfer,
   denyTransfer,
+  requestTransferFromDevice,
+  removeSyncDevice,
+  cancelAwaitingSource,
   type SyncState,
 } from '../utils/sync'
 import {
@@ -1078,10 +1081,13 @@ function SyncPage({ syncState, onTriggerSync, onSyncEnabled, onSyncDisabled }: S
   const [syncCodeInput, setSyncCodeInput] = useState('')
   const [generatedCode, setGeneratedCode] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
+  const [codeCopied, setCodeCopied] = useState(false)
+  const [codeRevealed, setCodeRevealed] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [pendingRemoveId, setPendingRemoveId] = useState<string | null>(null)
 
-  // Show the current sync code (masked) if enabled
+  // Show the current sync code if enabled
   const currentCode = getSyncCode()
 
   const handleGenerate = useCallback(async () => {
@@ -1126,6 +1132,14 @@ function SyncPage({ syncState, onTriggerSync, onSyncEnabled, onSyncDisabled }: S
     }).catch(() => {})
   }, [generatedCode])
 
+  const handleCopyCurrentCode = useCallback(() => {
+    if (!currentCode) return
+    navigator.clipboard.writeText(currentCode).then(() => {
+      setCodeCopied(true)
+      setTimeout(() => setCodeCopied(false), 2000)
+    }).catch(() => {})
+  }, [currentCode])
+
   const handleDisable = useCallback(() => {
     disableSync()
     setEnabled(false)
@@ -1140,7 +1154,8 @@ function SyncPage({ syncState, onTriggerSync, onSyncEnabled, onSyncDisabled }: S
     syncState.status === 'connecting' ? 'Connecting…' :
     syncState.status === 'offline' ? 'Offline' :
     syncState.status === 'error' ? 'Error' :
-    syncState.status === 'transferring' ? 'Transferring…' :
+    syncState.status === 'transferring' ? 'Receiving notes…' :
+    syncState.status === 'awaiting-source' ? (syncState.needsTransfer && !syncState.awaitingDeviceId ? 'Choose a source device' : 'Waiting…') :
     syncState.status === 'idle' ? 'Connected' : 'Off'
 
   const statusClass =
@@ -1153,13 +1168,86 @@ function SyncPage({ syncState, onTriggerSync, onSyncEnabled, onSyncDisabled }: S
     ? new Date(syncState.lastSync).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
     : null
 
-  // Mask sync code for display: show first 6 chars, mask the rest
-  const maskedCode = currentCode
-    ? currentCode.slice(0, 6) + '•'.repeat(Math.max(0, currentCode.length - 6))
-    : ''
+  // Devices excluding the new device's own row when picking a source
+  const otherDevices = syncState.devices.filter(d => !d.isSelf)
+  const onlineOthers = otherDevices.filter(d => d.online)
 
   return (
     <div className="settings-panel">
+
+      {/* ── New-device source picker ─────────────────────── */}
+      {enabled && syncState.needsTransfer && !syncState.transferProgress && (
+        <div className="settings-section">
+          <p className="settings-label">Choose a Source Device</p>
+          <p className="settings-hint" style={{ marginTop: 0, marginBottom: 10 }}>
+            Pick a device to copy your notes from. It must be online and approve the request.
+          </p>
+          {syncState.awaitingDeviceId && (
+            <div
+              style={{
+                padding: 10,
+                background: 'var(--accent-soft)',
+                borderRadius: 8,
+                marginBottom: 10,
+                fontSize: 12,
+                color: 'var(--text)',
+              }}
+            >
+              Waiting for <strong>{syncState.awaitingDeviceName}</strong> to come online.
+              Open Notes on that device, then this will continue automatically.{' '}
+              <button
+                onClick={cancelAwaitingSource}
+                style={{ background: 'none', border: 0, color: 'var(--accent)', padding: 0, cursor: 'pointer', fontSize: 12 }}
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+          {otherDevices.length === 0 ? (
+            <p className="settings-hint">No other devices in this sync chain yet.</p>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {otherDevices.map(d => (
+                <button
+                  key={d.deviceId}
+                  className="s3-backup-now-btn"
+                  onClick={() => requestTransferFromDevice(d.deviceId)}
+                  disabled={syncState.status === 'transferring'}
+                  style={{
+                    width: '100%',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 10,
+                    justifyContent: 'flex-start',
+                    opacity: d.online ? 1 : 0.7,
+                  }}
+                  title={d.online ? 'Tap to import from this device' : 'Offline — tap to wait until it reconnects'}
+                >
+                  <span
+                    aria-hidden="true"
+                    style={{
+                      width: 8,
+                      height: 8,
+                      borderRadius: '50%',
+                      background: d.online ? 'var(--accent)' : 'var(--text-faint)',
+                      flexShrink: 0,
+                    }}
+                  />
+                  <span style={{ flex: 1, textAlign: 'left' }}>{d.deviceName}</span>
+                  <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>
+                    {d.online ? 'Online' : 'Offline'}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+          {!syncState.awaitingDeviceId && onlineOthers.length === 0 && otherDevices.length > 0 && (
+            <p className="settings-hint" style={{ marginTop: 10 }}>
+              None of your devices are online right now. Open Notes on one of them, then pick it above.
+            </p>
+          )}
+        </div>
+      )}
 
       {/* ── Transfer approval modal ─────────────────────── */}
       {syncState.pendingTransfer && (
@@ -1206,14 +1294,14 @@ function SyncPage({ syncState, onTriggerSync, onSyncEnabled, onSyncDisabled }: S
       )}
 
       {/* ── Status section (when enabled) ─────────────────── */}
-      {enabled && (
+      {enabled && !syncState.needsTransfer && (
         <div className="settings-section">
           <p className="settings-label">Sync Status</p>
           <div className="sync-status-row">
             <span className={`sync-status-dot ${statusClass}`} />
             <span>{statusLabel}</span>
             {syncState.deviceCount > 1 && (
-              <span className="sync-device-count">{syncState.deviceCount} devices</span>
+              <span className="sync-device-count">{syncState.deviceCount} online</span>
             )}
             {lastSyncStr && <span className="sync-last-time">Last: {lastSyncStr}</span>}
           </div>
@@ -1268,22 +1356,121 @@ function SyncPage({ syncState, onTriggerSync, onSyncEnabled, onSyncDisabled }: S
         </div>
       )}
 
-      {/* ── Sync code info (when enabled, after dismissing generated code) ── */}
-      {enabled && !generatedCode && (
+      {/* ── Sync code (always visible when enabled) ──────── */}
+      {enabled && !generatedCode && currentCode && (
         <div className="settings-section">
           <p className="settings-label">Sync Code</p>
-          <p className="settings-hint" style={{ marginTop: 0, marginBottom: 6 }}>
-            Your notes are encrypted with your unique sync code. Use it on another device to link them.
+          <p className="settings-hint" style={{ marginTop: 0, marginBottom: 8 }}>
+            Use this code on a new device to add it to your sync chain.
           </p>
           <div
+            className="sync-code-display"
             style={{
               fontFamily: 'monospace',
-              fontSize: '12px',
-              color: 'var(--text-secondary, #888)',
-              letterSpacing: '1px',
+              fontSize: '12.5px',
+              background: 'var(--bg-secondary, #f5f5f5)',
+              border: '1px solid var(--border, #ddd)',
+              borderRadius: '8px',
+              padding: '10px 12px',
+              wordBreak: 'break-all',
+              lineHeight: 1.5,
+              userSelect: 'all',
+              letterSpacing: '0.5px',
+              filter: codeRevealed ? 'none' : 'blur(5px)',
+              transition: 'filter 120ms ease',
+              cursor: codeRevealed ? 'text' : 'pointer',
             }}
+            onClick={() => !codeRevealed && setCodeRevealed(true)}
+            title={codeRevealed ? '' : 'Click to reveal'}
           >
-            {maskedCode}
+            {currentCode}
+          </div>
+          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+            <button
+              className="s3-backup-now-btn"
+              onClick={handleCopyCurrentCode}
+              style={{ flex: 1 }}
+            >
+              {codeCopied ? 'Copied ✓' : 'Copy Code'}
+            </button>
+            <button
+              className="modal-cancel-btn"
+              onClick={() => setCodeRevealed(r => !r)}
+              style={{ flex: 1 }}
+            >
+              {codeRevealed ? 'Hide' : 'Reveal'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Device list ───────────────────────────────────── */}
+      {enabled && !generatedCode && syncState.devices.length > 0 && (
+        <div className="settings-section">
+          <p className="settings-label">Devices in Sync Chain</p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {syncState.devices.map(d => (
+              <div
+                key={d.deviceId}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
+                  padding: '8px 10px',
+                  background: 'var(--bg-elevated)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 8,
+                }}
+              >
+                <span
+                  aria-hidden="true"
+                  style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: '50%',
+                    background: d.online ? 'var(--accent)' : 'var(--text-faint)',
+                    flexShrink: 0,
+                  }}
+                  title={d.online ? 'Online' : 'Offline'}
+                />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--text)' }}>
+                    {d.deviceName}
+                    {d.isSelf && <span style={{ marginLeft: 6, fontSize: 10, color: 'var(--text-faint)', fontWeight: 400 }}>(this device)</span>}
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--text-faint)' }}>
+                    {d.online ? 'Online' : 'Offline'}
+                  </div>
+                </div>
+                {pendingRemoveId === d.deviceId ? (
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button
+                      className="settings-danger-btn"
+                      onClick={() => { removeSyncDevice(d.deviceId); setPendingRemoveId(null) }}
+                      style={{ padding: '4px 10px', fontSize: 11 }}
+                    >
+                      Confirm
+                    </button>
+                    <button
+                      className="modal-cancel-btn"
+                      onClick={() => setPendingRemoveId(null)}
+                      style={{ padding: '4px 10px', fontSize: 11 }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    className="modal-cancel-btn"
+                    onClick={() => setPendingRemoveId(d.deviceId)}
+                    style={{ padding: '4px 10px', fontSize: 11 }}
+                    title={d.isSelf ? 'Remove this device from sync (will disable sync here)' : 'Remove from sync chain'}
+                  >
+                    Remove
+                  </button>
+                )}
+              </div>
+            ))}
           </div>
         </div>
       )}
@@ -1342,7 +1529,7 @@ function SyncPage({ syncState, onTriggerSync, onSyncEnabled, onSyncDisabled }: S
           {mode === 'existing' && (
             <div>
               <p className="settings-hint" style={{ marginTop: 0, marginBottom: 10 }}>
-                Enter the sync code from your other device. You can include or omit the dashes.
+                Enter the sync code from your other device. After linking, pick which device to copy your notes from.
               </p>
               <input
                 type="text"
@@ -1380,7 +1567,7 @@ function SyncPage({ syncState, onTriggerSync, onSyncEnabled, onSyncDisabled }: S
       )}
 
       {/* ── Sync Now button ───────────────────────────────── */}
-      {enabled && !generatedCode && (
+      {enabled && !generatedCode && !syncState.needsTransfer && (
         <div className="settings-section">
           <button
             className="s3-backup-now-btn"
@@ -1403,18 +1590,13 @@ function SyncPage({ syncState, onTriggerSync, onSyncEnabled, onSyncDisabled }: S
       {enabled && !generatedCode && (
         <div className="settings-section">
           <button className="settings-danger-btn" onClick={handleDisable}>
-            Disable Sync
+            Disable Sync on This Device
           </button>
         </div>
       )}
 
       <p className="settings-hint">
-        Sync connects your devices via a secure WebSocket channel. Your notes are end-to-end encrypted
-        with a unique code that only you possess — the server never stores your data permanently.
-        It only relays encrypted changes until all your devices have received them, then deletes them.
-        The sync code has 143 bits of entropy, making brute-force attacks computationally infeasible.
-        New devices must be approved by an existing device before receiving notes.
-        Credentials (FB, S3, etc.) never leave your device.
+        Notes are end-to-end encrypted with your sync code; the server only relays encrypted changes and never sees your data.
       </p>
     </div>
   )

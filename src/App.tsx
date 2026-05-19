@@ -28,6 +28,7 @@ import {
   requestPersistentStorage,
 } from './utils/media'
 import { initVault, lockVault, hasPin as checkHasPin, secureGet } from './utils/vault'
+import { approveTransfer, denyTransfer } from './utils/sync'
 import './App.css'
 
 // ── Utilities ────────────────────────────────────────────────────────────────
@@ -1112,6 +1113,40 @@ export default function App() {
       })()}
 
       <InstallPrompt />
+
+      {/* ── Global sync transfer request modal ─────────────────────── */}
+      {syncState.pendingTransfer && (
+        <div
+          className="modal-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="sync-transfer-title"
+        >
+          <div className="modal-box">
+            <h3 id="sync-transfer-title" className="modal-title">
+              Allow sync to {syncState.pendingTransfer.requesterName}?
+            </h3>
+            <p className="modal-desc">
+              Another device using your sync code wants to import all your notes from this device.
+              Only approve if you recognize this device.
+            </p>
+            <div className="modal-actions">
+              <button
+                className="modal-cancel-btn"
+                onClick={() => denyTransfer(syncState.pendingTransfer!.transferId)}
+              >
+                Deny
+              </button>
+              <button
+                className="modal-confirm-btn"
+                onClick={() => approveTransfer(syncState.pendingTransfer!.transferId)}
+              >
+                Approve
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   )
 }

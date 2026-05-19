@@ -173,6 +173,11 @@ export function useNotes() {
     lastSync: getLastSyncTime(),
     error: null,
     deviceCount: 0,
+    devices: [],
+    selfDeviceId: null,
+    needsTransfer: false,
+    awaitingDeviceId: null,
+    awaitingDeviceName: null,
   });
   const notesRef = useRef(notes);
   notesRef.current = notes;

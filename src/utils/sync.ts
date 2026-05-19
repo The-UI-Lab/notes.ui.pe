@@ -54,7 +54,15 @@ const TRANSFER_CHUNK_SIZE = 50 // notes per chunk
 
 // ── Public types ───────────────────────────────────────────────────────────
 
-export type SyncStatus = 'idle' | 'syncing' | 'connecting' | 'error' | 'disabled' | 'offline' | 'transferring'
+export type SyncStatus = 'idle' | 'syncing' | 'connecting' | 'error' | 'disabled' | 'offline' | 'transferring' | 'awaiting-source'
+
+export interface SyncDevice {
+  deviceId: string
+  deviceName: string
+  online: boolean
+  lastSeenAt?: number
+  isSelf: boolean
+}
 
 export interface SyncState {
   enabled: boolean
@@ -62,6 +70,12 @@ export interface SyncState {
   lastSync: number | null
   error: string | null
   deviceCount: number
+  devices: SyncDevice[]
+  selfDeviceId: string | null
+  needsTransfer: boolean
+  /** When a chosen transfer source is currently offline. */
+  awaitingDeviceId: string | null
+  awaitingDeviceName: string | null
   transferProgress?: { current: number; total: number }
   pendingTransfer?: { transferId: number; requesterId: string; requesterName: string }
 }
@@ -289,6 +303,11 @@ let currentState: SyncState = {
   lastSync: null,
   error: null,
   deviceCount: 0,
+  devices: [],
+  selfDeviceId: null,
+  needsTransfer: false,
+  awaitingDeviceId: null,
+  awaitingDeviceName: null,
 }
 
 function updateState(patch: Partial<SyncState>): void {
@@ -417,10 +436,24 @@ async function handleServerMessage(msg: Record<string, unknown>): Promise<void> 
     case 'welcome': {
       const needsTransfer = msg.needsTransfer as boolean
       const cursor = msg.cursor as number
+      const selfId = (msg.selfDeviceId as string) || getDeviceId()
+      const rawDevices = (msg.devices as Array<{
+        deviceId: string; deviceName: string; online?: boolean; lastSeenAt?: number
+      }>) || []
+      const devices: SyncDevice[] = rawDevices.map(d => ({
+        deviceId: d.deviceId,
+        deviceName: d.deviceName,
+        online: d.online ?? (d.deviceId === selfId),
+        lastSeenAt: d.lastSeenAt,
+        isSelf: d.deviceId === selfId,
+      }))
 
       updateState({
-        status: needsTransfer ? 'transferring' : 'idle',
+        status: needsTransfer ? 'awaiting-source' : 'idle',
         deviceCount: msg.deviceCount as number,
+        devices,
+        selfDeviceId: selfId,
+        needsTransfer,
         error: null,
       })
 
@@ -429,10 +462,7 @@ async function handleServerMessage(msg: Record<string, unknown>): Promise<void> 
         setCursor(cursor)
       }
 
-      if (needsTransfer) {
-        // New device — request transfer from an existing device
-        ws?.send(JSON.stringify({ type: 'request-transfer' }))
-      } else {
+      if (!needsTransfer) {
         // Existing device — flush anything queued while offline. Do NOT
         // re-push the full note set: live edits are already pushed via
         // syncPushSingle, offline edits are in the queue, and brand-new
@@ -441,6 +471,8 @@ async function handleServerMessage(msg: Record<string, unknown>): Promise<void> 
         // "conflict copy" notes.
         await flushQueue()
       }
+      // New devices wait for the user to pick a source device explicitly
+      // (handled by UI calling requestTransferFromDevice).
       break
     }
 
@@ -581,14 +613,84 @@ async function handleServerMessage(msg: Record<string, unknown>): Promise<void> 
     }
 
     case 'device-joined': {
-      const delta = 1
-      updateState({ deviceCount: Math.max(1, currentState.deviceCount + delta) })
+      const joinedId = msg.deviceId as string
+      const joinedName = (msg.deviceName as string) || 'Device'
+      const selfId = currentState.selfDeviceId
+      const existing = currentState.devices.find(d => d.deviceId === joinedId)
+      let nextDevices: SyncDevice[]
+      if (existing) {
+        nextDevices = currentState.devices.map(d => d.deviceId === joinedId
+          ? { ...d, online: true, deviceName: joinedName, lastSeenAt: Date.now() }
+          : d)
+      } else {
+        nextDevices = [
+          ...currentState.devices,
+          {
+            deviceId: joinedId,
+            deviceName: joinedName,
+            online: true,
+            lastSeenAt: Date.now(),
+            isSelf: joinedId === selfId,
+          },
+        ]
+      }
+      updateState({
+        devices: nextDevices,
+        deviceCount: Math.max(1, currentState.deviceCount + (existing ? 0 : 1)),
+      })
+
+      // If we were waiting for this specific device to come online, auto-retry.
+      if (currentState.awaitingDeviceId === joinedId && ws?.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'request-transfer-from', targetDeviceId: joinedId }))
+        updateState({ status: 'transferring', error: null, awaitingDeviceId: null, awaitingDeviceName: null })
+      }
       break
     }
 
     case 'device-left': {
-      const delta = -1
-      updateState({ deviceCount: Math.max(1, currentState.deviceCount + delta) })
+      const leftId = msg.deviceId as string
+      const nextDevices = currentState.devices.map(d =>
+        d.deviceId === leftId ? { ...d, online: false } : d
+      )
+      updateState({
+        devices: nextDevices,
+        deviceCount: Math.max(1, currentState.deviceCount - 1),
+      })
+      break
+    }
+
+    case 'device-removed': {
+      const removedId = msg.deviceId as string
+      const selfId = currentState.selfDeviceId
+      if (removedId === selfId) {
+        // We were removed from the sync chain. Disable sync locally.
+        disableSync()
+        updateState({
+          enabled: false,
+          status: 'disabled',
+          devices: [],
+          deviceCount: 0,
+          needsTransfer: false,
+          error: 'This device was removed from the sync chain.',
+        })
+      } else {
+        updateState({
+          devices: currentState.devices.filter(d => d.deviceId !== removedId),
+          deviceCount: Math.max(1, currentState.deviceCount - 1),
+        })
+      }
+      break
+    }
+
+    case 'transfer-target-offline': {
+      const targetId = msg.targetDeviceId as string
+      const targetName = (msg.targetDeviceName as string) || 'that device'
+      updateState({
+        status: 'awaiting-source',
+        awaitingDeviceId: targetId,
+        awaitingDeviceName: targetName,
+        error: null,
+      })
       break
     }
 
@@ -869,7 +971,17 @@ export function stopSync(): void {
     ws = null
   }
   callbacks = null
-  updateState({ enabled: false, status: 'disabled', deviceCount: 0, error: null })
+  updateState({
+    enabled: false,
+    status: 'disabled',
+    deviceCount: 0,
+    devices: [],
+    selfDeviceId: null,
+    needsTransfer: false,
+    awaitingDeviceId: null,
+    awaitingDeviceName: null,
+    error: null,
+  })
 }
 
 export async function syncPushSingle(note: Note): Promise<void> {
@@ -917,6 +1029,55 @@ export async function denyTransfer(transferId: number): Promise<void> {
   if (ws?.readyState !== WebSocket.OPEN) return
   ws.send(JSON.stringify({ type: 'deny-transfer', transferId }))
   updateState({ pendingTransfer: undefined })
+}
+
+/**
+ * Ask a specific device in the sync chain for an initial notes transfer.
+ * Used by the new-device onboarding picker.
+ */
+export async function requestTransferFromDevice(targetDeviceId: string): Promise<void> {
+  if (ws?.readyState !== WebSocket.OPEN) {
+    updateState({ error: 'Not connected to the sync server. Try again in a moment.' })
+    return
+  }
+  const target = currentState.devices.find(d => d.deviceId === targetDeviceId)
+  if (target && !target.online) {
+    updateState({
+      status: 'awaiting-source',
+      awaitingDeviceId: targetDeviceId,
+      awaitingDeviceName: target.deviceName,
+      error: null,
+    })
+    return
+  }
+  updateState({
+    status: 'transferring',
+    awaitingDeviceId: null,
+    awaitingDeviceName: null,
+    error: null,
+  })
+  ws.send(JSON.stringify({ type: 'request-transfer-from', targetDeviceId }))
+}
+
+/** Cancel a pending "waiting for device to come online" state. */
+export function cancelAwaitingSource(): void {
+  updateState({
+    status: currentState.needsTransfer ? 'awaiting-source' : 'idle',
+    awaitingDeviceId: null,
+    awaitingDeviceName: null,
+  })
+}
+
+/**
+ * Remove a device (any device in the sync chain, including this one) from
+ * the sync chain. The removed device is force-disconnected on the server.
+ */
+export async function removeSyncDevice(deviceId: string): Promise<void> {
+  if (ws?.readyState !== WebSocket.OPEN) {
+    updateState({ error: 'Not connected to the sync server.' })
+    return
+  }
+  ws.send(JSON.stringify({ type: 'remove-device', deviceId }))
 }
 
 // ── Gallery sync ──────────────────────────────────────────────────────────

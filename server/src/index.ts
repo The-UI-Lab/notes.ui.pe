@@ -64,6 +64,7 @@ import {
   approveTransfer,
   updateTransferStatus,
   updateTransferResumeToken,
+  removeDevice,
   runMaintenance,
 } from './db.js'
 
@@ -647,6 +648,12 @@ function handleMessage(client: Client, msg: Record<string, unknown>, ip: string)
     const maxSeq = getMaxSeq(roomId)
     const hasPendingOps = device.cursor < maxSeq
 
+    // Build set of online device IDs for this room
+    const onlineIds = new Set<string>()
+    for (const c of room) {
+      if (c.deviceId) onlineIds.add(c.deviceId)
+    }
+
     // Send welcome
     client.ws.send(JSON.stringify({
       type: 'welcome',
@@ -654,7 +661,13 @@ function handleMessage(client: Client, msg: Record<string, unknown>, ip: string)
       cursor: device.cursor,
       maxSeq,
       needsTransfer: isNewDevice,
-      devices: allDevices.map(d => ({ deviceId: d.deviceId, deviceName: d.deviceName })),
+      selfDeviceId: deviceId,
+      devices: allDevices.map(d => ({
+        deviceId: d.deviceId,
+        deviceName: d.deviceName,
+        online: onlineIds.has(d.deviceId),
+        lastSeenAt: d.lastSeenAt,
+      })),
     }))
 
     // Notify other devices
@@ -733,7 +746,80 @@ function handleMessage(client: Client, msg: Record<string, unknown>, ip: string)
     return
   }
 
-  // ── Request transfer (new device wants notes from existing device) ─────────
+  // ── Request transfer FROM a specific device (targeted) ──────────────────
+  if (type === 'request-transfer-from') {
+    const targetDeviceId = msg.targetDeviceId as string
+    if (!targetDeviceId || typeof targetDeviceId !== 'string') {
+      client.ws.send(JSON.stringify({ type: 'error', message: 'Missing targetDeviceId' }))
+      return
+    }
+
+    // Verify target device exists in this room
+    const targetDevice = getDevice(roomId, targetDeviceId)
+    if (!targetDevice) {
+      client.ws.send(JSON.stringify({ type: 'error', message: 'Target device not found in this sync chain' }))
+      return
+    }
+
+    // Check if target is currently online
+    const room = rooms.get(roomId)
+    const isOnline = room ? Array.from(room).some(c => c.deviceId === targetDeviceId && c.ws.readyState === WebSocket.OPEN) : false
+    if (!isOnline) {
+      client.ws.send(JSON.stringify({
+        type: 'transfer-target-offline',
+        targetDeviceId,
+        targetDeviceName: targetDevice.deviceName,
+      }))
+      return
+    }
+
+    // Create transfer and send targeted request to that one device
+    const transferId = createTransfer(roomId, deviceId)
+    sendToDevice(roomId, targetDeviceId, {
+      type: 'transfer-requested',
+      transferId,
+      requesterId: deviceId,
+      requesterName: client.deviceName || 'Unknown Device',
+    })
+    client.ws.send(JSON.stringify({ type: 'transfer-pending', transferId }))
+    return
+  }
+
+  // ── Remove a device from the sync chain ─────────────────────────────────
+  if (type === 'remove-device') {
+    const targetDeviceId = msg.deviceId as string
+    if (!targetDeviceId || typeof targetDeviceId !== 'string') {
+      client.ws.send(JSON.stringify({ type: 'error', message: 'Missing deviceId' }))
+      return
+    }
+
+    // A device can remove any device in its sync chain (including itself).
+    // Sync codes are the only auth — anyone with the code is trusted.
+    removeDevice(roomId, targetDeviceId)
+
+    // Force-close the removed device's socket if it's currently connected,
+    // and remove it from the room so it doesn't keep receiving ops.
+    const room = rooms.get(roomId)
+    if (room) {
+      for (const c of Array.from(room)) {
+        if (c.deviceId === targetDeviceId) {
+          try {
+            c.ws.send(JSON.stringify({ type: 'device-removed', deviceId: targetDeviceId, byDeviceId: deviceId }))
+          } catch { /* ignore */ }
+          try { c.ws.close() } catch { /* ignore */ }
+          room.delete(c)
+        }
+      }
+    }
+
+    // Tell remaining devices in the room
+    broadcast(roomId, client, { type: 'device-removed', deviceId: targetDeviceId, byDeviceId: deviceId })
+    // Also acknowledge to the requester
+    client.ws.send(JSON.stringify({ type: 'device-removed', deviceId: targetDeviceId, byDeviceId: deviceId }))
+    return
+  }
+
+  // ── Request transfer (legacy broadcast — new device wants notes) ─────────
   if (type === 'request-transfer') {
     // Check if there are other devices in this room
     const allDevices = getDevices(roomId)
