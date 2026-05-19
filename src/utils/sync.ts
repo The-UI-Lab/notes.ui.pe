@@ -50,7 +50,6 @@ const SYNC_PUSHED_KEY    = 'notes-sync-pushed'
 
 // ── Constants ─────────────────────────────────────────────────────────────
 
-const CONFLICT_WINDOW_MS = 5 * 60 * 1000 // 5 minutes — conflicts within this window create copies
 const TRANSFER_CHUNK_SIZE = 50 // notes per chunk
 
 // ── Public types ───────────────────────────────────────────────────────────
@@ -269,25 +268,15 @@ async function restoreOpMedia(op: OpNoteUpdate): Promise<void> {
 }
 
 // ── Conflict resolution ──────────────────────────────────────────────────
-
-function createConflictCopy(_existingNote: Note, incomingNote: Note): Note {
-  // Keep incoming as a separate "conflict copy" note
-  const conflictBody = `[Conflict Copy]\n\n${incomingNote.body}`
-  return {
-    ...incomingNote,
-    id: crypto.randomUUID(),
-    body: conflictBody,
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-  }
-}
-
-function shouldCreateConflictCopy(local: Note, remote: Note): boolean {
-  // If timestamps are within the conflict window AND content differs
-  if (local.body === remote.body) return false
-  const timeDiff = Math.abs(local.updatedAt - remote.updatedAt)
-  return timeDiff < CONFLICT_WINDOW_MS
-}
+//
+// We use pure last-writer-wins (LWW) on `updatedAt`. The previous
+// implementation generated a "conflict copy" whenever an incoming op was
+// within a 5-minute wall-clock window of the local note and the bodies
+// differed. That heuristic could not distinguish a true concurrent edit
+// from a stale re-push, so reconnect storms (mobile networks, etc.) would
+// reliably produce duplicate notes. A correct conflict detector requires a
+// per-note "last synced version" marker; until that is implemented, LWW is
+// the safer default for a personal notes app.
 
 // ── WebSocket sync engine ─────────────────────────────────────────────────
 
@@ -444,10 +433,13 @@ async function handleServerMessage(msg: Record<string, unknown>): Promise<void> 
         // New device — request transfer from an existing device
         ws?.send(JSON.stringify({ type: 'request-transfer' }))
       } else {
-        // Existing device — flush queue and push changes
+        // Existing device — flush anything queued while offline. Do NOT
+        // re-push the full note set: live edits are already pushed via
+        // syncPushSingle, offline edits are in the queue, and brand-new
+        // peers receive data through the transfer flow. Re-broadcasting
+        // every note on every reconnect was the main source of duplicate
+        // "conflict copy" notes.
         await flushQueue()
-        await pushAllNotes()
-        await pushAllGalleryItems()
       }
       break
     }
@@ -565,8 +557,10 @@ async function handleServerMessage(msg: Record<string, unknown>): Promise<void> 
       if (chunkIndex + 1 >= totalChunks) {
         ws?.send(JSON.stringify({ type: 'transfer-complete', transferId }))
         updateState({ status: 'idle', transferProgress: undefined })
-        // Now push any local changes we made during transfer
-        await pushAllNotes()
+        // Any local edits made during the transfer were already pushed
+        // live via syncPushSingle (ws was open). Just flush anything that
+        // happened to land in the queue.
+        await flushQueue()
       }
       break
     }
@@ -633,18 +627,12 @@ async function applyRemoteOp(payloadB64: string, syncCode: string): Promise<void
         const existing = localNotes.find(n => n.id === op.noteId)
 
         if (existing) {
-          if (shouldCreateConflictCopy(existing, op.note)) {
-            // Create conflict copy — keep local as primary, save remote as copy
-            const conflictNote = createConflictCopy(existing, op.note)
-            callbacks?.onNoteUpdated(conflictNote)
-            // Also update the original with the newer version
-            if (op.updatedAt > existing.updatedAt) {
-              callbacks?.onNoteUpdated(op.note)
-            }
-          } else if (op.updatedAt > existing.updatedAt) {
+          // Pure last-writer-wins. If the remote op is older than (or
+          // equal to) what we have locally, drop it — this is what
+          // prevents stale re-pushes from spawning duplicate notes.
+          if (op.updatedAt > existing.updatedAt) {
             callbacks?.onNoteUpdated(op.note)
           }
-          // If local is newer, ignore remote (LWW)
         } else {
           // New note from remote
           callbacks?.onNoteUpdated(op.note)
@@ -741,22 +729,6 @@ async function pushOp(op: SyncOp): Promise<void> {
 async function pushNoteUpdate(note: Note): Promise<void> {
   const op = await buildNoteUpdateOp(note)
   await pushOp(op)
-}
-
-async function pushAllNotes(): Promise<void> {
-  if (!callbacks) return
-  const notes = callbacks.getNotes()
-  for (const note of notes) {
-    await pushNoteUpdate(note)
-  }
-}
-
-async function pushAllGalleryItems(): Promise<void> {
-  if (!callbacks?.getGalleryItems) return
-  const items = callbacks.getGalleryItems()
-  for (const item of items) {
-    await syncPushGalleryAdd(item)
-  }
 }
 
 async function flushQueue(): Promise<void> {
@@ -920,10 +892,13 @@ export async function triggerSync(): Promise<void> {
   if (!isSyncEnabled()) return
 
   if (ws?.readyState === WebSocket.OPEN) {
-    // Request ops since our cursor
+    // Request ops since our cursor. We deliberately do NOT re-push every
+    // local note here — live edits are already pushed via syncPushSingle,
+    // and offline edits are in the queue (flushed on welcome). Forcing a
+    // full re-broadcast caused stale ops to be re-delivered to peers and
+    // generated duplicate notes.
     ws.send(JSON.stringify({ type: 'pull', since: getCursor() }))
-    await pushAllNotes()
-    await pushAllGalleryItems()
+    await flushQueue()
   } else {
     await connect()
   }
