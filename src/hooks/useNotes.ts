@@ -27,6 +27,8 @@ import { secureGet, secureSet } from '../utils/vault';
 
 const STORAGE_KEY   = 'notes-app-v1';
 const MIGRATION_KEY = 'notes-media-migrated-v1';
+const CONFLICT_CLEANUP_KEY = 'notes-conflict-copies-cleaned-v1';
+const CONFLICT_PREFIX_RE = /^\[Conflict Copy\]\n\n/;
 
 interface RawNote {
   id?: unknown;
@@ -207,6 +209,29 @@ export function useNotes() {
         setNotes(migrated);
       }
     } catch { /* migration is best-effort */ }
+    // One-time cleanup of "[Conflict Copy]" duplicates left over from the
+    // pre-LWW sync implementation. These were stored as separate notes
+    // with fresh UUIDs and kept being re-broadcast between devices, which
+    // is what users see as "hundreds of conflict copies of one note".
+    try {
+      if (!localStorage.getItem(CONFLICT_CLEANUP_KEY)) {
+        const current = await loadNotes();
+        const conflictIds = current
+          .filter(n => CONFLICT_PREFIX_RE.test(n.body))
+          .map(n => n.id);
+        if (conflictIds.length) {
+          const cleaned = current.filter(n => !conflictIds.includes(n.id));
+          persist(cleaned);
+          setNotes(cleaned);
+          // Propagate deletions over sync (records tombstones too, so
+          // peers can't resurrect them on their next reconnect).
+          for (const id of conflictIds) {
+            syncDeleteNote(id).catch(() => {});
+          }
+        }
+        localStorage.setItem(CONFLICT_CLEANUP_KEY, '1');
+      }
+    } catch { /* cleanup is best-effort */ }
   }, []);
 
   // Load gallery separately — never blocks vault initialization.

@@ -43,6 +43,12 @@ const SYNC_DEVICE_NAME_KEY = 'notes-sync-device-name'
 const SYNC_CURSOR_KEY    = 'notes-sync-cursor'
 const SYNC_QUEUE_KEY     = 'notes-sync-queue'
 const SYNC_LAST_KEY      = 'notes-sync-last'
+const SYNC_TOMBSTONES_KEY = 'notes-sync-tombstones'
+
+// How long to keep tombstones around. A device that's been offline longer
+// than this and then re-broadcasts an old note will be allowed to resurrect
+// it — which is the right trade-off (we can't keep tombstones forever).
+const TOMBSTONE_TTL_MS = 90 * 24 * 60 * 60 * 1000 // 90 days
 
 // Legacy keys — used for migration
 const SYNC_PASSWORD_KEY  = 'notes-sync-password'
@@ -166,6 +172,46 @@ function getCursor(): number {
 
 function setCursor(cursor: number): void {
   localStorage.setItem(SYNC_CURSOR_KEY, String(cursor))
+}
+
+// ── Tombstones ────────────────────────────────────────────────────────────
+//
+// When a note is deleted we record { noteId -> deletedAt }. Any incoming
+// note-update with updatedAt <= deletedAt is dropped, which prevents a
+// peer that hasn't yet seen our delete from resurrecting the note. Without
+// this, deleting old "[Conflict Copy]" duplicates was futile: every other
+// device would just re-upload them on its next reconnect.
+
+type TombstoneMap = Record<string, number>
+
+function loadTombstones(): TombstoneMap {
+  try {
+    const raw = localStorage.getItem(SYNC_TOMBSTONES_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw) as TombstoneMap
+    // Garbage-collect stale entries
+    const cutoff = Date.now() - TOMBSTONE_TTL_MS
+    let mutated = false
+    for (const id of Object.keys(parsed)) {
+      if (parsed[id] < cutoff) { delete parsed[id]; mutated = true }
+    }
+    if (mutated) localStorage.setItem(SYNC_TOMBSTONES_KEY, JSON.stringify(parsed))
+    return parsed
+  } catch { return {} }
+}
+
+function recordTombstone(noteId: string, deletedAt: number): void {
+  const map = loadTombstones()
+  if ((map[noteId] ?? 0) < deletedAt) {
+    map[noteId] = deletedAt
+    localStorage.setItem(SYNC_TOMBSTONES_KEY, JSON.stringify(map))
+  }
+}
+
+function isTombstoned(noteId: string, updatedAt: number): boolean {
+  const map = loadTombstones()
+  const t = map[noteId]
+  return typeof t === 'number' && updatedAt <= t
 }
 
 // ── Offline queue ─────────────────────────────────────────────────────────
@@ -724,6 +770,9 @@ async function applyRemoteOp(payloadB64: string, syncCode: string): Promise<void
 
     switch (op.type) {
       case 'note-update': {
+        // Drop ops for notes we've already deleted; otherwise a peer that
+        // hasn't seen the delete yet would resurrect the note.
+        if (isTombstoned(op.noteId, op.updatedAt)) break
         await restoreOpMedia(op)
         const localNotes = callbacks?.getNotes() ?? []
         const existing = localNotes.find(n => n.id === op.noteId)
@@ -742,6 +791,7 @@ async function applyRemoteOp(payloadB64: string, syncCode: string): Promise<void
         break
       }
       case 'note-delete': {
+        recordTombstone(op.noteId, op.deletedAt)
         callbacks?.onNoteDeleted(op.noteId)
         break
       }
@@ -941,6 +991,7 @@ export function disableSync(): void {
   localStorage.removeItem(SYNC_PUSHED_KEY)
   localStorage.removeItem(SYNC_QUEUE_KEY)
   localStorage.removeItem(SYNC_LAST_KEY)
+  localStorage.removeItem(SYNC_TOMBSTONES_KEY)
   cachedSyncCode = null
   stopSync()
 }
@@ -992,10 +1043,12 @@ export async function syncPushSingle(note: Note): Promise<void> {
 export async function syncDeleteNote(noteId: string): Promise<void> {
   if (!isSyncEnabled()) return
 
+  const deletedAt = Date.now()
+  recordTombstone(noteId, deletedAt)
   const op: OpNoteDelete = {
     type: 'note-delete',
     noteId,
-    deletedAt: Date.now(),
+    deletedAt,
   }
   await pushOp(op)
 }
