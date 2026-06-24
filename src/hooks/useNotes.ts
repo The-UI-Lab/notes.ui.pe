@@ -351,7 +351,7 @@ export function useNotes() {
    * Move a gallery item into a note: adds it to the note's media array and
    * removes it from the gallery manifest (blob stays in the media store).
    */
-  const useGalleryItem = useCallback((item: GalleryItem, noteId: string) => {
+  const attachGalleryItem = useCallback((item: GalleryItem, noteId: string) => {
     // Add to note
     const ref: MediaRef = {
       id: item.id,
@@ -486,7 +486,7 @@ export function useNotes() {
     galleryItems,
     addToGalleryItems,
     removeGalleryItem,
-    useGalleryItem,
+    attachGalleryItem,
     syncState,
     setSyncState,
     notesLoaded,

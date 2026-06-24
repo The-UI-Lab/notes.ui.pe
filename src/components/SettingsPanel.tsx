@@ -685,7 +685,6 @@ export function SettingsPanel({
               value={password}
               onChange={e => { setPassword(e.target.value); setPwdError('') }}
               onKeyDown={e => e.key === 'Enter' && !opRunning && submitPassword()}
-              // eslint-disable-next-line jsx-a11y/no-autofocus
               autoFocus
               autoComplete="new-password"
             />

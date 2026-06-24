@@ -59,7 +59,6 @@ import {
   getMaxSeq,
   truncateDeliveredOps,
   createTransfer,
-  getPendingTransfers,
   getTransfer,
   approveTransfer,
   updateTransferStatus,
