@@ -4,7 +4,8 @@ import type { Note, FbPostInfo, MediaRef } from './types'
 import { SettingsPanel } from './components/SettingsPanel'
 import { FacebookFeed } from './components/FacebookFeed'
 import { FacebookInsights } from './components/FacebookInsights'
-import { MediaThumb, useMediaUrl } from './components/MediaThumb'
+import { MediaThumb } from './components/MediaThumb'
+import { useMediaUrl } from './hooks/useMediaUrl'
 import { InstallPrompt } from './components/InstallPrompt'
 import { LockScreen } from './components/LockScreen'
 import { PhotoGallery } from './components/PhotoGallery'
@@ -133,7 +134,7 @@ export default function App() {
     notes, createNote, updateNote, deleteNote,
     addMedia, removeMedia, restoreNotes,
     setFbPost, clearFbPost,
-    galleryItems, addToGalleryItems, removeGalleryItem, useGalleryItem,
+    galleryItems, addToGalleryItems, removeGalleryItem, attachGalleryItem,
     syncState, initSync, stopSyncEngine, triggerSync, schedulePush,
     loadFromVault, loadGallery,
   } = useNotes()
@@ -699,7 +700,7 @@ export default function App() {
             onRemove={removeGalleryItem}
             onUse={(item) => {
               if (selectedNote) {
-                useGalleryItem(item, selectedNote.id)
+                attachGalleryItem(item, selectedNote.id)
               }
             }}
             hasActiveNote={!!selectedNote}
