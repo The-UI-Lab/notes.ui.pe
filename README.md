@@ -28,7 +28,12 @@ bucket. Installable as a PWA and works offline.
 - React 19 + TypeScript
 - Vite 8 + `vite-plugin-pwa` (Workbox)
 - Web Crypto, IndexedDB, Web Storage APIs (zero runtime deps for storage/crypto)
-- Nginx (production runtime)
+- Sync server (`server/`) — Node + `ws` WebSocket relay backed by SQLite
+  (`better-sqlite3`); an ephemeral mailbox that only relays client-encrypted
+  blobs. Also handles the Facebook token exchange. Optional — the app works
+  fully without it.
+- Nginx (production runtime) — serves the SPA and reverse-proxies `/ws` and
+  `/api` to the sync server
 
 ## Local development
 
@@ -39,20 +44,38 @@ npm run build        # tsc -b && vite build  → ./dist
 npm run preview      # preview the built bundle
 ```
 
-There are **no build-time environment variables**. All settings (Facebook
-credentials, S3 credentials, theme) are entered at runtime in **Settings** and
-stored in the browser only.
+Per-user settings (S3 credentials, theme, sync code) are entered at runtime in
+**Settings** and stored in the browser only. A few environment variables
+configure the optional sync server and Facebook integration — see
+[`.env.example`](.env.example):
+
+- `VITE_FB_APP_ID` — **build-time** (baked into the frontend bundle); enables
+  the "Connect Facebook Page" button.
+- `FB_APP_SECRET` — server-only; used for the Facebook token exchange.
+- `SYNC_SERVER_KEY` — server-only; signs WebSocket join tokens. If unset, a
+  random key is generated at boot and all join tokens are invalidated on every
+  restart, so set it in production.
+- `SYNC_PORT`, `SYNC_DATA_DIR` — sync server port and SQLite data directory.
+
+None are required to run the core local-first app; they only enable sync and
+Facebook publishing.
 
 ## Configuration (in-app)
 
 Open the **⚙ Settings** panel from the sidebar:
 
-- **Facebook Page** — paste a long-lived **Page Access Token** and the **Page
-  ID**. The token is used directly from the browser via Graph API v19; ensure
-  the token has the `pages_manage_posts` and `pages_read_engagement` scopes.
-- **S3 backup** — endpoint, region, bucket, access key, secret key. Works with
-  AWS, Cloudflare R2, Backblaze B2, MinIO, etc. The bucket must allow CORS
-  `PUT`/`GET`/`LIST` from your domain.
+- **Facebook Page** — click **Connect Facebook Page** to run the Facebook
+  Login flow. The browser obtains a short-lived user token, the sync server
+  exchanges it for permanent Page access tokens (requires `VITE_FB_APP_ID` +
+  `FB_APP_SECRET`), and you pick which Page(s) to connect. Page posts and
+  insights are then called directly from the browser via Graph API v19.
+  Requires the `pages_manage_posts`, `pages_read_engagement`, `pages_show_list`,
+  `pages_manage_metadata` and `business_management` scopes.
+- **S3 backup** — region, bucket, access key, secret key, and an optional
+  **endpoint**. With no endpoint it targets AWS S3; set the endpoint to use any
+  S3-compatible provider (Cloudflare R2, Backblaze B2, MinIO, …). The bucket
+  must allow CORS `PUT`/`GET`/`LIST` from your domain, and non-AWS endpoint
+  hosts must be allowed by the page's CSP `connect-src` (see `nginx.conf`).
 - **Storage** — see current usage versus the browser's quota and request
   persistent storage if it's still "best-effort".
 
@@ -60,7 +83,9 @@ Open the **⚙ Settings** panel from the sidebar:
 
 The repo ships a production-ready Docker setup:
 
-- [`Dockerfile`](Dockerfile) — multi-stage Node 20 build → Nginx Alpine runtime
+- [`Dockerfile`](Dockerfile) — multi-stage build (frontend + sync server) on a
+  Node 20 Alpine runtime with nginx installed; [`entrypoint.sh`](entrypoint.sh)
+  starts both the sync server and nginx
 - [`nginx.conf`](nginx.conf) — SPA fallback, gzip, immutable cache for
   `/assets/*`, no-cache for `index.html`, `sw.js`, and the manifest
 - [`.dockerignore`](.dockerignore) — keeps build context lean and prevents
@@ -75,8 +100,12 @@ The repo ships a production-ready Docker setup:
 3. **Port:** expose container port **80**.
 4. **Domain:** attach your domain in Dokploy and enable HTTPS (Let's Encrypt).
    The PWA's installability and service worker require HTTPS in production.
-5. **Environment variables:** **none required.** All app settings are stored
-   client-side per browser; no server-side secrets exist.
+5. **Environment variables:** none are required for the core local-first app.
+   To enable sync and Facebook publishing, set the variables from
+   [`.env.example`](.env.example) — notably `SYNC_SERVER_KEY` (persist it so
+   join tokens survive restarts), `VITE_FB_APP_ID` (build-time) and
+   `FB_APP_SECRET`. Mount a volume at `SYNC_DATA_DIR` (default `/data/sync`) so
+   the sync SQLite database persists across deploys.
 6. **Deploy.** On every push, Dokploy will rebuild the image and roll out a new
    container.
 
