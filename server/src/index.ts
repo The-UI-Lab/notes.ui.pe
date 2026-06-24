@@ -60,6 +60,7 @@ import {
   truncateDeliveredOps,
   createTransfer,
   getTransfer,
+  getPendingTransfers,
   approveTransfer,
   updateTransferStatus,
   updateTransferResumeToken,
@@ -684,6 +685,35 @@ function handleMessage(client: Client, msg: Record<string, unknown>, ip: string)
             deviceId: op.deviceId,
             createdAt: op.createdAt,
           })),
+        }))
+      }
+    }
+
+    // Replay any still-pending transfer requests so an approver that was
+    // offline (or backgrounded — mobile PWAs drop their socket whenever the
+    // app loses focus) sees the approval prompt as soon as it (re)connects.
+    // Previously `transfer-requested` was a fire-and-forget `sendToDevice`
+    // that was silently lost if the approver had no live socket at that
+    // instant, and nothing ever re-delivered it — so the prompt never showed,
+    // "not even when they returned". An established device that joins is a
+    // candidate source/approver; a brand-new device (needsTransfer) has no
+    // notes to send, so it is never asked to approve.
+    if (!isNewDevice) {
+      const pending = getPendingTransfers(roomId)
+      for (const t of pending) {
+        if (t.status !== 'pending') continue        // already approved/in-flight
+        if (t.requesterId === deviceId) continue     // don't ask the requester to approve itself
+        // Only prompt when the requester is still connected to receive the data.
+        const requesterOnline = Array.from(room).some(
+          c => c.deviceId === t.requesterId && c.ws.readyState === WebSocket.OPEN,
+        )
+        if (!requesterOnline) continue
+        const requester = getDevice(roomId, t.requesterId)
+        client.ws.send(JSON.stringify({
+          type: 'transfer-requested',
+          transferId: t.id,
+          requesterId: t.requesterId,
+          requesterName: requester?.deviceName || 'A device',
         }))
       }
     }
