@@ -136,7 +136,7 @@ async function loadFbConnectionsAsync(): Promise<FbConnections | null> {
   }
 }
 
-const S3_FALLBACK: S3Config    = { bucket: '', region: '', accessKeyId: '', secretAccessKey: '' }
+const S3_FALLBACK: S3Config    = { bucket: '', region: '', accessKeyId: '', secretAccessKey: '', endpoint: '' }
 
 // ── Icons (inline SVGs as components for reuse) ────────────────────────────
 
@@ -545,6 +545,19 @@ export function SettingsPanel({
               placeholder="us-east-1"
               value={s3Draft.region}
               onChange={e => setS3Draft(d => ({ ...d, region: e.target.value }))}
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </div>
+          <div className="settings-form-row">
+            <label className="settings-form-label" htmlFor="s3-endpoint">Endpoint</label>
+            <input
+              id="s3-endpoint"
+              type="text"
+              className="settings-form-input"
+              placeholder="(optional) e.g. <id>.r2.cloudflarestorage.com"
+              value={s3Draft.endpoint ?? ''}
+              onChange={e => setS3Draft(d => ({ ...d, endpoint: e.target.value }))}
               autoComplete="off"
               spellCheck={false}
             />
