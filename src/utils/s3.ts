@@ -1,9 +1,15 @@
 /**
  * Minimal AWS Signature Version 4 + S3 REST API helpers for browser use.
  *
- * Requirements for the S3 bucket:
+ * Works with AWS S3 (virtual-host addressing) and any S3-compatible provider
+ * via a custom `endpoint` (path-style addressing): Cloudflare R2, Backblaze B2,
+ * MinIO, etc.
+ *
+ * Requirements for the bucket:
  *   1. CORS must allow the PWA origin (PUT, GET, HEAD, DELETE + preflight OPTIONS).
- *   2. The IAM credentials need s3:GetObject, s3:PutObject, s3:ListBucket.
+ *   2. The credentials need s3:GetObject, s3:PutObject, s3:ListBucket.
+ *   3. For non-AWS endpoints, the endpoint host must be allowed by the page's
+ *      CSP `connect-src` (see nginx.conf).
  */
 
 export interface S3Config {
@@ -11,6 +17,14 @@ export interface S3Config {
   region: string
   accessKeyId: string
   secretAccessKey: string
+  /**
+   * Optional custom endpoint for S3-compatible providers (Cloudflare R2,
+   * Backblaze B2, MinIO, etc.). When set, requests use path-style addressing
+   * (`https://<endpoint>/<bucket>/<key>`). When empty, AWS virtual-host
+   * addressing (`https://<bucket>.s3.<region>.amazonaws.com`) is used.
+   * May be supplied with or without a scheme; `https://` is assumed if omitted.
+   */
+  endpoint?: string
 }
 
 export interface BackupItem {
@@ -104,6 +118,14 @@ async function buildAuthHeaders(
 }
 
 function s3Url(config: S3Config, path: string): URL {
+  const endpoint = config.endpoint?.trim()
+  if (endpoint) {
+    // Path-style addressing for S3-compatible providers (R2, B2, MinIO, …).
+    const base = (/^https?:\/\//i.test(endpoint) ? endpoint : `https://${endpoint}`)
+      .replace(/\/+$/, '')
+    return new URL(`${base}/${config.bucket}${path}`)
+  }
+  // AWS virtual-host addressing.
   return new URL(`https://${config.bucket}.s3.${config.region}.amazonaws.com${path}`)
 }
 
