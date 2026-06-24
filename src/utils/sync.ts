@@ -29,7 +29,7 @@ import {
   removeFromGallery,
   type MediaRecord,
 } from './media'
-import type { Note, GalleryItem } from '../types'
+import type { Note, GalleryItem, MediaRef } from '../types'
 import { secureGet, secureSet } from './vault'
 
 // ── Config / persistence keys ──────────────────────────────────────────────
@@ -56,7 +56,17 @@ const SYNC_PUSHED_KEY    = 'notes-sync-pushed'
 
 // ── Constants ─────────────────────────────────────────────────────────────
 
-const TRANSFER_CHUNK_SIZE = 50 // notes per chunk
+// Largest per-blob size we will sync. Compressed photos (2048px WebP) and
+// short clips fit comfortably; very large videos are intentionally excluded
+// from sync to keep relay payloads bounded (the WS relay caps frames at 16MB).
+// The previous 512KB cap silently dropped most attachments — including
+// ordinary photos — so notes synced as text with broken image refs.
+const MAX_SYNC_MEDIA_BYTES = 5 * 1024 * 1024 // 5 MB
+
+// Target encoded size per initial-transfer chunk. Notes are grouped up to this
+// budget (with their inlined media) so a single chunk never approaches the
+// relay's 16MB frame limit even after base64 inflation.
+const TRANSFER_CHUNK_BUDGET_BYTES = 3 * 1024 * 1024 // 3 MB
 
 // ── Public types ───────────────────────────────────────────────────────────
 
@@ -291,7 +301,7 @@ async function buildNoteUpdateOp(note: Note): Promise<OpNoteUpdate> {
   for (const ref of note.media) {
     const blob = await getMediaBlob(ref.id)
     if (!blob) continue
-    if (blob.size <= 512 * 1024) {
+    if (blob.size <= MAX_SYNC_MEDIA_BYTES) {
       inlinedMedia.push({ id: ref.id, mime: ref.mime, data: await blobToBase64(blob) })
     }
   }
@@ -304,14 +314,27 @@ async function buildNoteUpdateOp(note: Note): Promise<OpNoteUpdate> {
   }
 }
 
-// ── Restore media from operation ─────────────────────────────────────────
+// ── Restore media from operation / transfer ──────────────────────────────
 
-async function restoreOpMedia(op: OpNoteUpdate): Promise<void> {
-  for (const m of op.media) {
+/**
+ * Restore a batch of inlined media blobs into IndexedDB, skipping any that
+ * already exist locally. `refNotes` supplies the MediaRef metadata (type,
+ * dimensions) for each blob so restored records carry their original shape.
+ */
+async function restoreMediaList(
+  media: { id: string; mime: string; data: string }[],
+  refNotes: Note[],
+): Promise<void> {
+  if (!media.length) return
+  const refById = new Map<string, MediaRef>()
+  for (const note of refNotes) {
+    for (const ref of note.media) refById.set(ref.id, ref)
+  }
+  for (const m of media) {
     const existing = await getMedia(m.id)
     if (existing) continue
     const blob = base64ToBlob(m.data, m.mime)
-    const ref = op.note.media.find(r => r.id === m.id)
+    const ref = refById.get(m.id)
     const rec: MediaRecord = {
       id: m.id,
       type: ref?.type ?? 'image',
@@ -325,6 +348,10 @@ async function restoreOpMedia(op: OpNoteUpdate): Promise<void> {
     }
     await putMedia(rec)
   }
+}
+
+async function restoreOpMedia(op: OpNoteUpdate): Promise<void> {
+  await restoreMediaList(op.media, [op.note])
 }
 
 // ── Conflict resolution ──────────────────────────────────────────────────
@@ -617,12 +644,22 @@ async function handleServerMessage(msg: Record<string, unknown>): Promise<void> 
       // Decrypt and apply the chunk
       try {
         const decrypted = await decryptBackup(syncCode, base64ToArrayBuffer(chunk))
-        const notes = JSON.parse(decrypted) as Note[]
+        const parsed = JSON.parse(decrypted) as
+          | Note[]
+          | { notes: Note[]; media: { id: string; mime: string; data: string }[] }
+
+        // Backward-compatible: legacy approvers sent a bare Note[] with no
+        // media. New approvers send { notes, media } so attachments transfer.
+        const notes: Note[] = Array.isArray(parsed) ? parsed : (parsed.notes ?? [])
+        const media = Array.isArray(parsed) ? [] : (parsed.media ?? [])
+
+        // Restore the actual media blobs BEFORE merging notes so the UI never
+        // renders a note whose attachment blob isn't present yet.
+        await restoreMediaList(media, notes)
+
         const localNotes = callbacks?.getNotes() ?? []
         const localMap = new Map(localNotes.map(n => [n.id, n]))
-
         for (const note of notes) {
-          // Restore media refs
           localMap.set(note.id, note)
         }
 
@@ -833,17 +870,66 @@ async function applyRemoteOp(payloadB64: string, syncCode: string): Promise<void
 
 // ── Transfer: send chunks to a new device ────────────────────────────────
 
+interface TransferChunkPayload {
+  notes: Note[]
+  media: { id: string; mime: string; data: string }[]
+}
+
+/**
+ * Partition notes into size-bounded chunks, inlining each note's media blobs
+ * (deduplicated across the whole transfer). Grouping by encoded byte budget —
+ * rather than a fixed note count — keeps every chunk under the relay's frame
+ * limit regardless of how large individual attachments are.
+ */
+async function buildTransferChunks(notes: Note[]): Promise<TransferChunkPayload[]> {
+  const chunks: TransferChunkPayload[] = []
+  const seenMedia = new Set<string>()
+  let current: TransferChunkPayload = { notes: [], media: [] }
+  let currentBytes = 0
+
+  for (const note of notes) {
+    // Collect this note's not-yet-sent media blobs (under the size cap).
+    const noteMedia: TransferChunkPayload['media'] = []
+    for (const ref of note.media) {
+      if (seenMedia.has(ref.id)) continue
+      const blob = await getMediaBlob(ref.id)
+      if (!blob || blob.size > MAX_SYNC_MEDIA_BYTES) continue
+      seenMedia.add(ref.id)
+      noteMedia.push({ id: ref.id, mime: ref.mime, data: await blobToBase64(blob) })
+    }
+
+    const addedBytes =
+      JSON.stringify(note).length + noteMedia.reduce((sum, m) => sum + m.data.length, 0)
+
+    // Flush the current chunk if adding this note would blow the budget
+    // (but never produce an empty chunk).
+    if (current.notes.length > 0 && currentBytes + addedBytes > TRANSFER_CHUNK_BUDGET_BYTES) {
+      chunks.push(current)
+      current = { notes: [], media: [] }
+      currentBytes = 0
+    }
+
+    current.notes.push(note)
+    current.media.push(...noteMedia)
+    currentBytes += addedBytes
+  }
+
+  // Always send at least one chunk so a brand-new device with zero notes still
+  // receives a (terminal) chunk and completes the transfer handshake.
+  if (current.notes.length > 0 || chunks.length === 0) chunks.push(current)
+  return chunks
+}
+
 async function sendTransferChunks(transferId: number, startIndex: number = 0): Promise<void> {
   const syncCode = getSyncCode()
   if (!syncCode || !callbacks) return
 
   const notes = callbacks.getNotes()
-  const totalChunks = Math.max(1, Math.ceil(notes.length / TRANSFER_CHUNK_SIZE))
+  const chunks = await buildTransferChunks(notes)
+  const totalChunks = chunks.length
 
   for (let i = startIndex; i < totalChunks; i++) {
-    const chunkNotes = notes.slice(i * TRANSFER_CHUNK_SIZE, (i + 1) * TRANSFER_CHUNK_SIZE)
-    const chunkJson = JSON.stringify(chunkNotes)
-    const encrypted = await encryptBackup(syncCode, chunkJson)
+    const encrypted = await encryptBackup(syncCode, JSON.stringify(chunks[i]))
     const chunkB64 = arrayBufferToBase64(encrypted)
 
     const resumeToken = String(i + 1)
@@ -1140,7 +1226,7 @@ export async function syncPushGalleryAdd(item: GalleryItem): Promise<void> {
   if (!isSyncEnabled()) return
   const blob = await getMediaBlob(item.id)
   let mediaData: OpGalleryAdd['mediaData'] = null
-  if (blob && blob.size <= 512 * 1024) {
+  if (blob && blob.size <= MAX_SYNC_MEDIA_BYTES) {
     mediaData = { id: item.id, mime: item.mime, data: await blobToBase64(blob) }
   }
   const op: OpGalleryAdd = {
