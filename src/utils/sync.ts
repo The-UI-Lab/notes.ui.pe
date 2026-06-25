@@ -438,11 +438,11 @@ async function refreshJoinToken(): Promise<{ roomId: string; token: string } | n
 // Build the `join` payload. `hasData` tells the server whether this device
 // already holds notes locally. The server can't inspect our (E2E-encrypted)
 // data, so without this hint it inferred "new device" purely from cursor === 0
-// — which wrongly flagged the device that *generated* the sync code (owns all
-// the notes but hasn't pushed any ops, so cursor is still 0) as a device
-// needing a transfer. That left both devices stuck on "Choose a source device"
-// with neither ever showing the approval prompt. A device that has local notes
-// is a source/approver, never a transfer requester.
+// — which wrongly flagged the device that *generated* the sync code (and owns
+// all the notes, but hasn't pushed any ops yet, so cursor is still 0) as a
+// device needing a transfer. That left both devices stuck on "Choose a source
+// device" with neither ever showing the approval prompt. A device that has
+// local notes is a source/approver, never a transfer requester.
 function buildJoinPayload(roomId: string, token: string): string {
   return JSON.stringify({
     type: 'join',
