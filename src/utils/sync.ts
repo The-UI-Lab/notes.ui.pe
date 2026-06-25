@@ -457,10 +457,19 @@ function buildJoinPayload(roomId: string, token: string): string {
 async function connect(): Promise<void> {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return
 
-  const syncCode = getSyncCode()
-  if (!syncCode) return
-
   updateState({ status: 'connecting', error: null })
+
+  // The sync code lives encrypted in the vault; the plaintext is only held in
+  // `cachedSyncCode`. Right after enableSync() the in-memory value is set but
+  // its async persist may not have landed yet. If we don't have it in memory,
+  // (re)load it from the vault before giving up — and if it's still missing,
+  // schedule a retry instead of silently dead-ending on "Connecting…" forever.
+  let syncCode = getSyncCode()
+  if (!syncCode) syncCode = await loadSyncCode()
+  if (!syncCode) {
+    scheduleReconnect()
+    return
+  }
 
   const joinInfo = await getJoinToken()
   if (!joinInfo) {
@@ -1039,21 +1048,32 @@ export async function validateSyncCode(syncCode: string): Promise<{ roomId: stri
 let cachedSyncCode: string | null = null
 
 export function getSyncCode(): string {
-  if (cachedSyncCode !== null) return cachedSyncCode
-  return localStorage.getItem(SYNC_CODE_KEY)
-    ?? localStorage.getItem(SYNC_PASSWORD_KEY)
-    ?? ''
+  // The plaintext code is only ever held in memory. The on-disk value
+  // (SYNC_CODE_KEY / SYNC_PASSWORD_KEY) is vault-encrypted ciphertext, so it
+  // must NOT be returned here — doing so would hand callers a "v1:…" blob and
+  // derive the wrong room/key. Callers needing it before the vault has been
+  // read should await loadSyncCode().
+  return cachedSyncCode ?? ''
 }
 
 export async function loadSyncCode(): Promise<string> {
-  let val = await secureGet(SYNC_CODE_KEY)
-  if (!val) {
-    val = await secureGet(SYNC_PASSWORD_KEY)
-    if (val) {
-      await secureSet(SYNC_CODE_KEY, val)
+  try {
+    let val = await secureGet(SYNC_CODE_KEY)
+    if (!val) {
+      val = await secureGet(SYNC_PASSWORD_KEY)
+      if (val) {
+        await secureSet(SYNC_CODE_KEY, val)
+      }
     }
+    // Only adopt a value we actually decrypted. Crucially, do NOT clobber a
+    // code already held in memory (e.g. one just set by enableSync() whose
+    // async vault write hasn't landed yet) with an empty read — that race was
+    // what left connect() with no code and the UI stuck on "Connecting…".
+    if (val) cachedSyncCode = val
+  } catch (e) {
+    console.warn('[sync] Failed to load sync code from vault:', e)
   }
-  cachedSyncCode = val ?? ''
+  if (cachedSyncCode === null) cachedSyncCode = ''
   return cachedSyncCode
 }
 
