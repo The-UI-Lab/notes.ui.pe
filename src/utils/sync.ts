@@ -435,6 +435,25 @@ async function refreshJoinToken(): Promise<{ roomId: string; token: string } | n
   return getJoinToken()
 }
 
+// Build the `join` payload. `hasData` tells the server whether this device
+// already holds notes locally. The server can't inspect our (E2E-encrypted)
+// data, so without this hint it inferred "new device" purely from cursor === 0
+// — which wrongly flagged the device that *generated* the sync code (and owns
+// all the notes, but hasn't pushed any ops yet, so cursor is still 0) as a
+// device needing a transfer. That left both devices stuck on "Choose a source
+// device" with neither ever showing the approval prompt. A device that has
+// local notes is a source/approver, never a transfer requester.
+function buildJoinPayload(roomId: string, token: string): string {
+  return JSON.stringify({
+    type: 'join',
+    roomId,
+    token,
+    deviceId: getDeviceId(),
+    deviceName: getDeviceName(),
+    hasData: (callbacks?.getNotes()?.length ?? 0) > 0,
+  })
+}
+
 async function connect(): Promise<void> {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return
 
@@ -461,13 +480,7 @@ async function connect(): Promise<void> {
   }
 
   ws.onopen = () => {
-    ws!.send(JSON.stringify({
-      type: 'join',
-      roomId,
-      token,
-      deviceId: getDeviceId(),
-      deviceName: getDeviceName(),
-    }))
+    ws!.send(buildJoinPayload(roomId, token))
   }
 
   ws.onmessage = async (event) => {
@@ -785,13 +798,7 @@ async function handleServerMessage(msg: Record<string, unknown>): Promise<void> 
         console.log('[sync] Token expired, refreshing…')
         const newJoin = await refreshJoinToken()
         if (newJoin && ws?.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({
-            type: 'join',
-            roomId: newJoin.roomId,
-            token: newJoin.token,
-            deviceId: getDeviceId(),
-            deviceName: getDeviceName(),
-          }))
+          ws.send(buildJoinPayload(newJoin.roomId, newJoin.token))
         }
       }
       break
