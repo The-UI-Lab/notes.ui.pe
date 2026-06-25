@@ -16,7 +16,7 @@
  *
  * WebSocket protocol (JSON messages):
  *   Client → Server:
- *     { type: 'join',             roomId, token, deviceId, deviceName, hasData }
+ *     { type: 'join',             roomId, token, deviceId, deviceName, needsTransfer }
  *     { type: 'push-op',         payload (base64) }
  *     { type: 'ack',             cursor }
  *     { type: 'request-transfer' }
@@ -641,18 +641,17 @@ function handleMessage(client: Client, msg: Record<string, unknown>, ip: string)
     const room = getRoom(roomId)
     room.add(client)
 
-    // A device "needs a transfer" only when it has NO notes of its own yet and
-    // there is another device in the chain to copy from. The client reports
-    // whether it already holds local notes via `hasData` — the server can't
-    // see the (E2E-encrypted) data itself. Relying on `cursor === 0` alone was
-    // wrong: the device that generated the sync code owns all the notes but
-    // hasn't pushed any ops, so its cursor is still 0. That misclassified the
-    // notes-holding device as a transfer requester, so both devices showed
-    // "Choose a source device" and the approval prompt never appeared anywhere.
-    const hasData = msg.hasData === true
+    // Whether this device needs an initial transfer is the CLIENT's own
+    // declaration (`needsTransfer`), driven by persisted intent: it generated
+    // the code (origin → false) or entered an existing code and hasn't yet
+    // pulled the notes (→ true). The server can't infer this — the data is
+    // E2E-encrypted, note count is unreliable (fresh devices can have a seed
+    // note), and `cursor === 0` is true for the origin too. We only honor the
+    // request when there's actually another device to copy from.
+    const clientNeedsTransfer = msg.needsTransfer === true
     const allDevices = getDevices(roomId)
     const otherDevices = allDevices.filter(d => d.deviceId !== deviceId)
-    const isNewDevice = !hasData && device.cursor === 0 && otherDevices.length > 0
+    const isNewDevice = clientNeedsTransfer && otherDevices.length > 0
     const maxSeq = getMaxSeq(roomId)
     const hasPendingOps = device.cursor < maxSeq
 
