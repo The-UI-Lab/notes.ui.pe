@@ -52,6 +52,8 @@ const SYNC_TOMBSTONES_KEY = 'notes-sync-tombstones'
 // transfer?" — note count and the server-side cursor are both unreliable
 // proxies (a fresh device can have a seed note; the origin's cursor is 0).
 const SYNC_INIT_ROOM_KEY = 'notes-sync-initialized-room'
+// One-time marker so the legacy backfill below runs at most once per device.
+const SYNC_INIT_MIGRATED_KEY = 'notes-sync-init-migrated-v1'
 
 // How long to keep tombstones around. A device that's been offline longer
 // than this and then re-broadcasts an old note will be allowed to resurrect
@@ -209,6 +211,25 @@ function markInitializedForRoom(roomId: string | null): void {
 /** True when this device still needs an initial transfer for the active chain. */
 function needsInitialTransfer(): boolean {
   return !isInitializedForRoom(getRoomId())
+}
+
+/**
+ * One-time backfill for devices that were paired BEFORE the per-chain
+ * initialized flag existed (they have no flag yet). A device that already holds
+ * notes is the source of truth for its chain and must never demand a transfer —
+ * mark it initialized. A device with no notes is genuinely empty and is left to
+ * request a transfer as normal. Runs at most once (gated by a marker that is
+ * set unconditionally), so a device that legitimately needs a transfer is never
+ * grandfathered later just because the user typed a note before approving.
+ */
+function migrateInitFlagIfNeeded(): void {
+  if (localStorage.getItem(SYNC_INIT_MIGRATED_KEY)) return
+  localStorage.setItem(SYNC_INIT_MIGRATED_KEY, '1')
+  const roomId = getRoomId()
+  if (!roomId) return
+  if (isInitializedForRoom(roomId)) return
+  const hasNotes = (callbacks?.getNotes()?.length ?? 0) > 0
+  if (hasNotes) markInitializedForRoom(roomId)
 }
 
 // ── Tombstones ────────────────────────────────────────────────────────────
@@ -687,6 +708,14 @@ async function handleServerMessage(msg: Record<string, unknown>): Promise<void> 
       const transferId = msg.transferId as number
       const requesterName = msg.requesterName as string
       const requesterId = msg.requesterId as string
+
+      // Guard: a device that itself still needs an initial transfer has no
+      // notes to give, so it must never be asked to approve one. And we never
+      // approve our own request. Without these guards a brand-new device could
+      // be shown an approve/deny prompt for its own join — nonsensical.
+      if (needsInitialTransfer() || requesterId === getDeviceId()) {
+        break
+      }
 
       updateState({
         pendingTransfer: { transferId, requesterId, requesterName },
@@ -1202,6 +1231,10 @@ export function startSync(cbs: SyncCallbacks): void {
   stopSync()
   if (!isSyncEnabled()) return
   callbacks = cbs
+  // Grandfather pre-existing devices (paired before the initialized flag) so a
+  // device that already holds the notes isn't wrongly treated as needing a
+  // transfer (which made it auto-request and prompt the brand-new device).
+  migrateInitFlagIfNeeded()
   updateState({ enabled: true, status: 'connecting' })
   loadSyncCode().then(() => connect()).catch(() => {})
 }
@@ -1284,6 +1317,8 @@ export async function denyTransfer(transferId: number): Promise<void> {
  * Used by the new-device onboarding picker.
  */
 export async function requestTransferFromDevice(targetDeviceId: string): Promise<void> {
+  // Never request a transfer from ourselves.
+  if (targetDeviceId === getDeviceId()) return
   if (ws?.readyState !== WebSocket.OPEN) {
     updateState({ error: 'Not connected to the sync server. Try again in a moment.' })
     return

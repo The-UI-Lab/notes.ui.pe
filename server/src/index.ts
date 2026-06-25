@@ -790,6 +790,12 @@ function handleMessage(client: Client, msg: Record<string, unknown>, ip: string)
       return
     }
 
+    // A device can never transfer from itself.
+    if (targetDeviceId === deviceId) {
+      client.ws.send(JSON.stringify({ type: 'error', message: 'Cannot request a transfer from this same device' }))
+      return
+    }
+
     // Verify target device exists in this room
     const targetDevice = getDevice(roomId, targetDeviceId)
     if (!targetDevice) {
