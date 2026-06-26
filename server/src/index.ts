@@ -16,7 +16,7 @@
  *
  * WebSocket protocol (JSON messages):
  *   Client → Server:
- *     { type: 'join',             roomId, token, deviceId, deviceName, needsTransfer }
+ *     { type: 'join',             roomId, token, deviceId, deviceName }
  *     { type: 'push-op',         payload (base64) }
  *     { type: 'ack',             cursor }
  *     { type: 'request-transfer' }
@@ -50,6 +50,7 @@ import {
   registerSyncCode,
   syncCodeExists,
   registerDevice,
+  markDeviceInitialized,
   getDevice,
   getDevices,
   updateDeviceCursor,
@@ -632,8 +633,16 @@ function handleMessage(client: Client, msg: Record<string, unknown>, ip: string)
     // Leave previous room if any
     removeClient(client)
 
+    // Determine the device's role from AUTHORITATIVE server state, not a client
+    // hint. A brand-new registration is a "founder" (initialized) only when no
+    // other device exists yet; a device joining an existing chain starts
+    // un-initialized and must receive a transfer before it's a full member.
+    // An existing row keeps whatever initialized state it already earned.
+    const othersBefore = getDevices(roomId).filter(d => d.deviceId !== deviceId)
+    const initializedIfNew = othersBefore.length === 0
+
     // Register/update device in DB
-    const device = registerDevice(roomId, deviceId, deviceName)
+    const device = registerDevice(roomId, deviceId, deviceName, initializedIfNew)
 
     client.roomId = roomId
     client.deviceId = deviceId
@@ -641,17 +650,11 @@ function handleMessage(client: Client, msg: Record<string, unknown>, ip: string)
     const room = getRoom(roomId)
     room.add(client)
 
-    // Whether this device needs an initial transfer is the CLIENT's own
-    // declaration (`needsTransfer`), driven by persisted intent: it generated
-    // the code (origin → false) or entered an existing code and hasn't yet
-    // pulled the notes (→ true). The server can't infer this — the data is
-    // E2E-encrypted, note count is unreliable (fresh devices can have a seed
-    // note), and `cursor === 0` is true for the origin too. We only honor the
-    // request when there's actually another device to copy from.
-    const clientNeedsTransfer = msg.needsTransfer === true
     const allDevices = getDevices(roomId)
     const otherDevices = allDevices.filter(d => d.deviceId !== deviceId)
-    const isNewDevice = clientNeedsTransfer && otherDevices.length > 0
+    // A device "needs a transfer" iff the server has it as un-initialized AND
+    // there is another device to copy from.
+    const isNewDevice = !device.initialized && otherDevices.length > 0
     const maxSeq = getMaxSeq(roomId)
     const hasPendingOps = device.cursor < maxSeq
 
@@ -1028,9 +1031,11 @@ function handleMessage(client: Client, msg: Record<string, unknown>, ip: string)
     updateTransferStatus(transferId, 'completed')
 
     // Update the new device's cursor to current max so it doesn't replay ops
-    // that were part of the transfer
+    // that were part of the transfer, and mark it initialized so it is never
+    // asked to bootstrap again (and rejoins as a full member).
     const maxSeq = getMaxSeq(roomId)
     updateDeviceCursor(roomId, transfer.requesterId, maxSeq)
+    markDeviceInitialized(roomId, transfer.requesterId)
 
     // Notify both parties
     sendToDevice(roomId, transfer.requesterId, { type: 'transfer-complete', transferId })

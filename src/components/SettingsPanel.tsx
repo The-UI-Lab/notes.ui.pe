@@ -1108,8 +1108,7 @@ function SyncPage({ syncState, onTriggerSync, onSyncEnabled, onSyncDisabled }: S
     try {
       const result = await generateSyncCode()
       setGeneratedCode(result.syncCode)
-      // We created this chain — we are the source of truth, no transfer needed.
-      enableSync(result.syncCode, result.roomId, result.token, { initialized: true })
+      enableSync(result.syncCode, result.roomId, result.token)
       setEnabled(true)
       onSyncEnabled()
     } catch (e) {
@@ -1125,9 +1124,7 @@ function SyncPage({ syncState, onTriggerSync, onSyncEnabled, onSyncDisabled }: S
     setError(null)
     try {
       const result = await validateSyncCode(syncCodeInput)
-      // We're joining an existing chain — we must pull the notes from an
-      // existing device before we're a full member.
-      enableSync(syncCodeInput, result.roomId, result.token, { initialized: false })
+      enableSync(syncCodeInput, result.roomId, result.token)
       setEnabled(true)
       setMode(null)
       setSyncCodeInput('')
