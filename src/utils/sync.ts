@@ -44,16 +44,6 @@ const SYNC_CURSOR_KEY    = 'notes-sync-cursor'
 const SYNC_QUEUE_KEY     = 'notes-sync-queue'
 const SYNC_LAST_KEY      = 'notes-sync-last'
 const SYNC_TOMBSTONES_KEY = 'notes-sync-tombstones'
-// Records the roomId this device has completed its initial bootstrap for. A
-// device is "initialized" for a chain when it either GENERATED the code (it is
-// the origin / source of truth) or finished RECEIVING an initial transfer. Any
-// other state means it still needs to pull the existing notes before it can be
-// treated as a full member. This is the authoritative signal for "do I need a
-// transfer?" — note count and the server-side cursor are both unreliable
-// proxies (a fresh device can have a seed note; the origin's cursor is 0).
-const SYNC_INIT_ROOM_KEY = 'notes-sync-initialized-room'
-// One-time marker so the legacy backfill below runs at most once per device.
-const SYNC_INIT_MIGRATED_KEY = 'notes-sync-init-migrated-v1'
 
 // How long to keep tombstones around. A device that's been offline longer
 // than this and then re-broadcasts an old note will be allowed to resurrect
@@ -194,43 +184,11 @@ function setCursor(cursor: number): void {
   localStorage.setItem(SYNC_CURSOR_KEY, String(cursor))
 }
 
-// ── Initial-transfer bootstrap state ───────────────────────────────────────
-
-function getRoomId(): string | null {
-  return localStorage.getItem(SYNC_ROOM_KEY)
-}
-
-function isInitializedForRoom(roomId: string | null): boolean {
-  return !!roomId && localStorage.getItem(SYNC_INIT_ROOM_KEY) === roomId
-}
-
-function markInitializedForRoom(roomId: string | null): void {
-  if (roomId) localStorage.setItem(SYNC_INIT_ROOM_KEY, roomId)
-}
-
-/** True when this device still needs an initial transfer for the active chain. */
-function needsInitialTransfer(): boolean {
-  return !isInitializedForRoom(getRoomId())
-}
-
-/**
- * One-time backfill for devices that were paired BEFORE the per-chain
- * initialized flag existed (they have no flag yet). A device that already holds
- * notes is the source of truth for its chain and must never demand a transfer —
- * mark it initialized. A device with no notes is genuinely empty and is left to
- * request a transfer as normal. Runs at most once (gated by a marker that is
- * set unconditionally), so a device that legitimately needs a transfer is never
- * grandfathered later just because the user typed a note before approving.
- */
-function migrateInitFlagIfNeeded(): void {
-  if (localStorage.getItem(SYNC_INIT_MIGRATED_KEY)) return
-  localStorage.setItem(SYNC_INIT_MIGRATED_KEY, '1')
-  const roomId = getRoomId()
-  if (!roomId) return
-  if (isInitializedForRoom(roomId)) return
-  const hasNotes = (callbacks?.getNotes()?.length ?? 0) > 0
-  if (hasNotes) markInitializedForRoom(roomId)
-}
+// Whether this device needs an initial transfer is decided AUTHORITATIVELY by
+// the server (the devices.initialized column) and delivered in `welcome`. We
+// keep it in `currentState.needsTransfer`; the client never tries to infer it
+// from local note count or a localStorage flag (both were unreliable and
+// caused already-synced devices to ask each other to re-sync).
 
 // ── Tombstones ────────────────────────────────────────────────────────────
 //
@@ -483,14 +441,9 @@ async function refreshJoinToken(): Promise<{ roomId: string; token: string } | n
   return getJoinToken()
 }
 
-// Build the `join` payload. `needsTransfer` is the device's own declaration of
-// whether it still needs an initial bootstrap for this chain — set from
-// persisted intent (generated the code, or finished a transfer), NOT inferred
-// from note count or the server cursor. Both of those were unreliable: a fresh
-// joining device often has a seed/empty note (so "has data" was true and it was
-// wrongly marked established → it never asked to sync), and the origin's cursor
-// is 0 (so it was wrongly marked new). The server trusts this declaration to
-// decide the device's role.
+// Build the `join` payload. The device's role (does it need an initial
+// transfer?) is decided server-side from authoritative per-device state, so the
+// client sends only its identity.
 function buildJoinPayload(roomId: string, token: string): string {
   return JSON.stringify({
     type: 'join',
@@ -498,7 +451,6 @@ function buildJoinPayload(roomId: string, token: string): string {
     token,
     deviceId: getDeviceId(),
     deviceName: getDeviceName(),
-    needsTransfer: !isInitializedForRoom(roomId),
   })
 }
 
@@ -579,7 +531,7 @@ function scheduleReconnect(): void {
  * fires while a transfer is already pending/in progress.
  */
 function maybeAutoRequestTransfer(): void {
-  if (!needsInitialTransfer()) return
+  if (!currentState.needsTransfer) return
   if (currentState.status === 'transferring') return
   if (currentState.pendingTransfer) return
   if (currentState.awaitingDeviceId) return
@@ -607,12 +559,9 @@ async function handleServerMessage(msg: Record<string, unknown>): Promise<void> 
         isSelf: d.deviceId === selfId,
       }))
 
-      // Authoritative "do we still need a transfer?" is our own persisted
-      // bootstrap state — not the server's hint (which only reflects whether
-      // other devices exist). We may still need a transfer even when the server
-      // can't tell, and we must NOT think we're done just because we happen to
-      // hold a stray local note.
-      const needsTransfer = needsInitialTransfer()
+      // The server is authoritative about whether we still need a transfer
+      // (it tracks per-device `initialized` state that can't race or get wiped).
+      const needsTransfer = msg.needsTransfer === true
 
       updateState({
         status: needsTransfer ? 'awaiting-source' : 'idle',
@@ -713,7 +662,7 @@ async function handleServerMessage(msg: Record<string, unknown>): Promise<void> 
       // notes to give, so it must never be asked to approve one. And we never
       // approve our own request. Without these guards a brand-new device could
       // be shown an approve/deny prompt for its own join — nonsensical.
-      if (needsInitialTransfer() || requesterId === getDeviceId()) {
+      if (currentState.needsTransfer || requesterId === getDeviceId()) {
         break
       }
 
@@ -772,12 +721,11 @@ async function handleServerMessage(msg: Record<string, unknown>): Promise<void> 
         console.warn('[sync] Failed to process transfer chunk:', e)
       }
 
-      // If this was the last chunk, mark transfer complete
+      // If this was the last chunk, mark transfer complete. The server records
+      // our `initialized` state on receiving transfer-complete, so subsequent
+      // joins will report needsTransfer:false; locally we clear it now too.
       if (chunkIndex + 1 >= totalChunks) {
         ws?.send(JSON.stringify({ type: 'transfer-complete', transferId }))
-        // We now hold the chain's notes — record this so we never ask for
-        // another initial transfer (and join as a full member from now on).
-        markInitializedForRoom(getRoomId())
         updateState({ status: 'idle', transferProgress: undefined, needsTransfer: false })
         // Any local edits made during the transfer were already pushed
         // live via syncPushSingle (ws was open). Just flush anything that
@@ -1175,33 +1123,12 @@ export async function loadSyncPassword(): Promise<string> {
   return loadSyncCode()
 }
 
-/**
- * Enable sync for a chain.
- *
- * `opts.initialized` declares whether this device already holds the chain's
- * notes and therefore does NOT need an initial transfer:
- *   - true  → this device GENERATED the code (it is the origin / source).
- *   - false → this device ENTERED an existing code (it must pull the notes
- *             from an existing device before it's a full member).
- */
-export function enableSync(
-  syncCode: string,
-  roomId?: string,
-  token?: string,
-  opts?: { initialized?: boolean },
-): void {
+export function enableSync(syncCode: string, roomId?: string, token?: string): void {
   localStorage.setItem(SYNC_ENABLED_KEY, '1')
   cachedSyncCode = normalizeSyncCode(syncCode)
   secureSet(SYNC_CODE_KEY, cachedSyncCode).catch(() => {})
   if (roomId) localStorage.setItem(SYNC_ROOM_KEY, roomId)
   if (token) localStorage.setItem(SYNC_TOKEN_KEY, token)
-  if (opts?.initialized && roomId) {
-    markInitializedForRoom(roomId)
-  } else if (opts?.initialized === false && roomId && !isInitializedForRoom(roomId)) {
-    // Joining a chain we haven't bootstrapped — make sure any stale flag from a
-    // different room doesn't suppress the initial transfer.
-    localStorage.removeItem(SYNC_INIT_ROOM_KEY)
-  }
 }
 
 export function disableSync(): void {
@@ -1215,7 +1142,6 @@ export function disableSync(): void {
   localStorage.removeItem(SYNC_QUEUE_KEY)
   localStorage.removeItem(SYNC_LAST_KEY)
   localStorage.removeItem(SYNC_TOMBSTONES_KEY)
-  localStorage.removeItem(SYNC_INIT_ROOM_KEY)
   cachedSyncCode = null
   stopSync()
 }
@@ -1231,10 +1157,6 @@ export function startSync(cbs: SyncCallbacks): void {
   stopSync()
   if (!isSyncEnabled()) return
   callbacks = cbs
-  // Grandfather pre-existing devices (paired before the initialized flag) so a
-  // device that already holds the notes isn't wrongly treated as needing a
-  // transfer (which made it auto-request and prompt the brand-new device).
-  migrateInitFlagIfNeeded()
   updateState({ enabled: true, status: 'connecting' })
   loadSyncCode().then(() => connect()).catch(() => {})
 }
@@ -1301,6 +1223,9 @@ export async function triggerSync(): Promise<void> {
 export async function approveTransfer(transferId: number): Promise<void> {
   if (ws?.readyState !== WebSocket.OPEN) return
   ws.send(JSON.stringify({ type: 'approve-transfer', transferId }))
+  // Dismiss the prompt immediately — we're the sender and stay connected. The
+  // modal must never linger even if the requester is slow or drops off.
+  updateState({ pendingTransfer: undefined })
   // Start sending chunks after a short delay (server will relay)
   setTimeout(() => sendTransferChunks(transferId, 0), 500)
 }

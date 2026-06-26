@@ -43,6 +43,13 @@ db.exec(`
     device_id     TEXT NOT NULL,
     device_name   TEXT NOT NULL DEFAULT 'Unknown Device',
     cursor        INTEGER NOT NULL DEFAULT 0,
+    -- 1 once this device holds the chain's notes (it founded the chain or
+    -- finished an initial transfer); 0 while it still needs to be bootstrapped.
+    -- This is the AUTHORITATIVE answer to "does this device need a transfer?" —
+    -- the client used to decide it from a localStorage flag / note count, which
+    -- raced with note-loading and got wiped, causing already-synced devices to
+    -- ask each other to re-sync.
+    initialized   INTEGER NOT NULL DEFAULT 1,
     last_seen_at  INTEGER NOT NULL DEFAULT (unixepoch() * 1000),
     created_at    INTEGER NOT NULL DEFAULT (unixepoch() * 1000),
     PRIMARY KEY (room_id, device_id)
@@ -73,6 +80,16 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_transfers_room ON transfers(room_id, status);
 `)
 
+// Migration for databases created before the `initialized` column existed.
+// Existing rows are devices that were ALREADY paired and syncing, so they are
+// established members — default them to initialized = 1 so they are never asked
+// to re-bootstrap. (Idempotent: the duplicate-column error is ignored.)
+try {
+  db.exec(`ALTER TABLE devices ADD COLUMN initialized INTEGER NOT NULL DEFAULT 1`)
+} catch {
+  /* column already exists */
+}
+
 // ── Sync code operations ─────────────────────────────────────────────────────
 
 const stmtRegisterSyncCode = db.prepare(`
@@ -97,25 +114,33 @@ export interface DeviceRecord {
   deviceId: string
   deviceName: string
   cursor: number
+  initialized: boolean
   lastSeenAt: number
   createdAt: number
 }
 
+// On first registration the `initialized` flag is set from the caller-supplied
+// value. On reconnect (ON CONFLICT) it is intentionally NOT touched — a device's
+// initialized state, once earned, is permanent for the life of its row.
 const stmtRegisterDevice = db.prepare(`
-  INSERT INTO devices (room_id, device_id, device_name, cursor, last_seen_at)
-  VALUES (?, ?, ?, 0, ?)
+  INSERT INTO devices (room_id, device_id, device_name, cursor, initialized, last_seen_at)
+  VALUES (?, ?, ?, 0, ?, ?)
   ON CONFLICT(room_id, device_id) DO UPDATE SET
     device_name = excluded.device_name,
     last_seen_at = excluded.last_seen_at
 `)
 
+const stmtSetInitialized = db.prepare(`
+  UPDATE devices SET initialized = 1 WHERE room_id = ? AND device_id = ?
+`)
+
 const stmtGetDevice = db.prepare(`
-  SELECT device_id, device_name, cursor, last_seen_at, created_at
+  SELECT device_id, device_name, cursor, initialized, last_seen_at, created_at
   FROM devices WHERE room_id = ? AND device_id = ?
 `)
 
 const stmtGetDevices = db.prepare(`
-  SELECT device_id, device_name, cursor, last_seen_at, created_at
+  SELECT device_id, device_name, cursor, initialized, last_seen_at, created_at
   FROM devices WHERE room_id = ?
 `)
 
@@ -139,46 +164,52 @@ const stmtGetMinCursor = db.prepare(`
   SELECT MIN(cursor) as min_cursor FROM devices WHERE room_id = ?
 `)
 
-export function registerDevice(roomId: string, deviceId: string, deviceName: string): DeviceRecord {
-  const now = Date.now()
-  stmtRegisterDevice.run(roomId, deviceId, deviceName, now)
-  const row = stmtGetDevice.get(roomId, deviceId) as {
-    device_id: string; device_name: string; cursor: number; last_seen_at: number; created_at: number
-  }
+type DeviceRow = {
+  device_id: string; device_name: string; cursor: number
+  initialized: number; last_seen_at: number; created_at: number
+}
+
+function toDeviceRecord(row: DeviceRow): DeviceRecord {
   return {
     deviceId: row.device_id,
     deviceName: row.device_name,
     cursor: row.cursor,
+    initialized: !!row.initialized,
     lastSeenAt: row.last_seen_at,
     createdAt: row.created_at,
   }
+}
+
+/**
+ * Register (or touch) a device. `initializedIfNew` sets the initialized flag
+ * ONLY when the row is first created — the founder of a chain (no other devices
+ * yet) is initialized; a device that joins an existing chain is not, until it
+ * finishes a transfer. Reconnects never change an existing row's flag.
+ */
+export function registerDevice(
+  roomId: string,
+  deviceId: string,
+  deviceName: string,
+  initializedIfNew: boolean,
+): DeviceRecord {
+  const now = Date.now()
+  stmtRegisterDevice.run(roomId, deviceId, deviceName, initializedIfNew ? 1 : 0, now)
+  return toDeviceRecord(stmtGetDevice.get(roomId, deviceId) as DeviceRow)
+}
+
+/** Mark a device as having completed its initial bootstrap (received a transfer). */
+export function markDeviceInitialized(roomId: string, deviceId: string): void {
+  stmtSetInitialized.run(roomId, deviceId)
 }
 
 export function getDevice(roomId: string, deviceId: string): DeviceRecord | null {
-  const row = stmtGetDevice.get(roomId, deviceId) as {
-    device_id: string; device_name: string; cursor: number; last_seen_at: number; created_at: number
-  } | undefined
-  if (!row) return null
-  return {
-    deviceId: row.device_id,
-    deviceName: row.device_name,
-    cursor: row.cursor,
-    lastSeenAt: row.last_seen_at,
-    createdAt: row.created_at,
-  }
+  const row = stmtGetDevice.get(roomId, deviceId) as DeviceRow | undefined
+  return row ? toDeviceRecord(row) : null
 }
 
 export function getDevices(roomId: string): DeviceRecord[] {
-  const rows = stmtGetDevices.all(roomId) as {
-    device_id: string; device_name: string; cursor: number; last_seen_at: number; created_at: number
-  }[]
-  return rows.map(r => ({
-    deviceId: r.device_id,
-    deviceName: r.device_name,
-    cursor: r.cursor,
-    lastSeenAt: r.last_seen_at,
-    createdAt: r.created_at,
-  }))
+  const rows = stmtGetDevices.all(roomId) as DeviceRow[]
+  return rows.map(toDeviceRecord)
 }
 
 export function updateDeviceCursor(roomId: string, deviceId: string, cursor: number): void {
